@@ -21,6 +21,7 @@ import {
   saveYtdlpSettings,
 } from "@/lib/api"
 import { LANGUAGE_OPTIONS, useI18n } from "@/lib/i18n"
+import { BilibiliSettingsPanel } from "@/components/bilibili-settings-panel"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -999,6 +1000,8 @@ export function SettingsDialog() {
                   {t.settings.azureConcurrencyHelp}
                 </p>
               </div>
+
+              <BilibiliSettingsPanel active={open} />
 
               {saveResults.length > 0 ? (
                 <div

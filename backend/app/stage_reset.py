@@ -17,6 +17,8 @@ STAGE_OWN_ARTIFACTS: dict[str, tuple[str, ...]] = {
     "tts": ("segments/tts",),
     "merge_audio": ("tmp/audio_dubbing.wav", "metadata/timings.json", "segments/stretched"),
     "merge_video": ("tmp/audio_mixed.m4a", "media/video_final.mp4"),
+    "bilibili_meta": ("metadata/bilibili_meta.json",),
+    "bilibili_publish": ("metadata/bilibili_publish.json",),
 }
 
 

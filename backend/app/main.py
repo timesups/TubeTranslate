@@ -30,6 +30,7 @@ from .sources import detect_source
 from .stage_reset import remove_stage_artifacts
 from .stages import STAGE_NAMES
 from .youtube import LOCAL_UPLOAD_DIRECTIONS, is_local_upload_url, validate_video_url
+from .bilibili.routes import router as bilibili_router
 
 ALLOWED_VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".flv", ".wmv"}
 ALLOWED_SUBTITLE_SUFFIXES = {".srt"}
@@ -66,6 +67,7 @@ class TaskCreate(BaseModel):
     execution_mode: str = "auto"
     audio_mode: str = "keep_bgm"
     tts_provider: str = "voxcpm"
+    bilibili_tid: int = 201
 
 
 class TaskBatchCreate(BaseModel):
@@ -73,6 +75,7 @@ class TaskBatchCreate(BaseModel):
     execution_mode: str = "auto"
     audio_mode: str = "keep_bgm"
     tts_provider: str = "voxcpm"
+    bilibili_tid: int = 201
 
 
 class TaskBatchDelete(BaseModel):
@@ -230,6 +233,7 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+app.include_router(bilibili_router)
 
 
 @app.exception_handler(RequestValidationError)
@@ -426,6 +430,13 @@ def normalize_tts_provider(value: str) -> str:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+def normalize_bilibili_tid(value: int | str) -> int:
+    try:
+        return database.normalize_bilibili_tid(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.post("/api/tasks", status_code=201)
 def create_task(payload: TaskCreate) -> dict:
     try:
@@ -444,6 +455,7 @@ def create_task(payload: TaskCreate) -> dict:
         execution_mode=normalize_execution_mode(payload.execution_mode),
         audio_mode=normalize_audio_mode(payload.audio_mode),
         tts_provider=normalize_tts_provider(payload.tts_provider),
+        bilibili_tid=normalize_bilibili_tid(payload.bilibili_tid),
     )
     worker.enqueue(task_id)
     return database.get_task(task_id)
@@ -475,6 +487,7 @@ def create_tasks_batch(payload: TaskBatchCreate) -> dict:
     execution_mode = normalize_execution_mode(payload.execution_mode)
     audio_mode = normalize_audio_mode(payload.audio_mode)
     tts_provider = normalize_tts_provider(payload.tts_provider)
+    bilibili_tid = normalize_bilibili_tid(payload.bilibili_tid)
 
     created: list[dict] = []
     existing: list[dict] = []
@@ -519,6 +532,7 @@ def create_tasks_batch(payload: TaskBatchCreate) -> dict:
                 execution_mode=execution_mode,
                 audio_mode=audio_mode,
                 tts_provider=tts_provider,
+                bilibili_tid=bilibili_tid,
             )
             worker.enqueue(task_id)
             task = database.get_task(task_id)
@@ -611,6 +625,7 @@ def upload_local_video(
     execution_mode: str = Form("auto"),
     audio_mode: str = Form("keep_bgm"),
     tts_provider: str = Form("voxcpm"),
+    bilibili_tid: int = Form(201),
 ) -> dict:
     if direction not in LOCAL_UPLOAD_DIRECTIONS:
         raise HTTPException(status_code=422, detail="Unsupported local video direction.")
@@ -623,6 +638,7 @@ def upload_local_video(
     normalized_execution_mode = normalize_execution_mode(execution_mode)
     normalized_audio_mode = normalize_audio_mode(audio_mode)
     normalized_tts_provider = normalize_tts_provider(tts_provider)
+    normalized_bilibili_tid = normalize_bilibili_tid(bilibili_tid)
     _ensure_runtime_ready()
 
     task_id = str(uuid.uuid4())
@@ -650,6 +666,7 @@ def upload_local_video(
             execution_mode=normalized_execution_mode,
             audio_mode=normalized_audio_mode,
             tts_provider=normalized_tts_provider,
+            bilibili_tid=normalized_bilibili_tid,
         )
         database.update_task(task_id, title=Path(original_name).stem)
         task = database.get_task(task_id)
@@ -833,6 +850,7 @@ def rerun_task(task_id: str) -> dict:
     execution_mode = task.get("execution_mode") or database.DEFAULT_EXECUTION_MODE
     audio_mode = task.get("audio_mode") or database.DEFAULT_AUDIO_MODE
     tts_provider = task.get("tts_provider") or database.DEFAULT_TTS_PROVIDER
+    bilibili_tid = task.get("bilibili_tid") or database.DEFAULT_BILIBILI_TID
     _purge_task(task)
     new_id = database.create_task(
         url,
@@ -840,6 +858,7 @@ def rerun_task(task_id: str) -> dict:
         execution_mode=execution_mode,
         audio_mode=audio_mode,
         tts_provider=tts_provider,
+        bilibili_tid=bilibili_tid,
     )
     worker.enqueue(new_id)
     return database.get_task(new_id)

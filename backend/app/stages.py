@@ -19,8 +19,9 @@ STAGES: tuple[StageSpec, ...] = (
     StageSpec("tts", "VoxCPM"),
     StageSpec("merge_audio", "Merge audio"),
     StageSpec("merge_video", "Merge video"),
+    StageSpec("bilibili_meta", "Bilibili metadata"),
+    StageSpec("bilibili_publish", "Bilibili publish"),
 )
 
 
 STAGE_NAMES = tuple(stage.name for stage in STAGES)
-

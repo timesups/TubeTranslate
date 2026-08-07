@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: mocks.replace }),
+  usePathname: () => "/tasks/task-race",
 }))
 
 vi.mock("@/components/app-header", () => ({

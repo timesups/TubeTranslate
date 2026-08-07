@@ -1,31 +1,58 @@
 # YouDub
 
-视频自动配音全栈工具：支持 YouTube（英→中）、Bilibili（中→英）与本地视频上传，完成下载、人声分离、ASR、翻译、TTS 与音视频合成。
+视频自动配音全栈工具：支持 YouTube（英→中）、Bilibili（中→英）与本地视频上传，完成下载、人声分离、ASR、翻译、TTS、合成，并可自动投稿到 B 站。
 
 - 后端：FastAPI + 任务队列 + SQLite
-- 前端：Next.js Web 控制台（夜间模式）
+- 前端：Next.js Web 控制台（夜间模式，侧栏「任务 / 投稿」）
 - 许可：Apache-2.0
 
 ## 功能概览
 
 - 批量创建任务（链接 / 本地视频）
-- 自动 / 手动执行模式；失败可从失败阶段继续，也可整任务重跑
-- 任务列表支持筛选、批量删除、批量重试
+- 创建时可指定 **B 站投稿分区**（默认：知识区 / 科学科普，`tid=201`）
+- 自动 / 手动执行模式；失败可从失败阶段继续，也可整任务重跑或按阶段重做（手动模式）
+- 任务列表：筛选、搜索、批量删除、批量重试失败任务
 - TTS 可选：VoxCPM、火山引擎、Azure Speech
-- 可选保留背景音乐（Demucs）或替换整轨音频
+- 音频模式：保留背景音乐（Demucs）或替换整轨音频
+- OpenAI 兼容翻译接口（也用于生成 B 站标题/简介）
 - API 口令登录（Argon2id）
+- B 站投稿：设置中 **扫码登录**；流水线末尾自动生成简介并投稿（自制稿）
 
 ### 处理流水线
 
-1. `download` — 下载 / 导入视频  
-2. `separate` — Demucs 人声分离  
+1. `download` — 下载 / 导入视频，并保存原平台缩略图为封面候选  
+2. `separate` — Demucs 人声分离（「替换原音轨」时跳过，直接抽音轨）  
 3. `asr` — Whisper 语音识别  
 4. `asr_fix` — 断句整理  
 5. `translate` — OpenAI 兼容接口翻译  
-6. `split_audio` — 按句切分人声  
+6. `split_audio` — 按句切分人声（云端 TTS 可能跳过）  
 7. `tts` — 语音合成  
 8. `merge_audio` — 合成配音轨  
-9. `merge_video` — 合成最终视频  
+9. `merge_video` — 合成最终视频（可额外导出到 `OUTPUT_DIR`）  
+10. `bilibili_meta` — 导出暂存包；用翻译 API 生成标题/简介/标签  
+11. `bilibili_publish` — 投稿到 B 站（自制稿，`copyright=1`）  
+
+## B 站投稿
+
+### 使用前准备
+
+1. 在 **设置** 中配置 OpenAI 兼容翻译接口（与配音翻译共用）  
+2. 打开 **设置 → B 站投稿**，用哔哩哔哩 App **扫码登录**  
+3. 可选：默认标签、暂存目录等  
+
+### 自动流程
+
+配音任务在「合成视频」后会自动执行「生成简介」与「投稿」：
+
+- 封面优先使用下载阶段保存的 **原视频缩略图**；没有时再从成片抽帧  
+- 分区使用 **创建任务时选择的分区**  
+- 暂存目录默认 `data/bilibili/staging`  
+- 未登录时 `bilibili_publish` 会失败：扫码登录后，从该阶段「继续 / 重做」即可  
+- 简介生成若模型返回非 JSON，会自动重试；仍失败则用字幕生成兜底文案  
+
+侧栏 **投稿** 页仍可扫描暂存目录，手动补生成简介或补投稿。
+
+B 站 Cookie 保存在本机 `data/bilibili/`，请勿提交到 Git。
 
 ## 环境要求
 
@@ -100,9 +127,9 @@ python -c "from pwdlib import PasswordHash; print(PasswordHash.recommended().has
 ```env
 YOUDUB_AUTH_PASSWORD_HASH=$argon2id$v=19$m=...
 DEVICE=cuda
-OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_BASE_URL=https://api.deepseek.com
 OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4o-mini
+OPENAI_MODEL=deepseek-v4-flash
 ```
 
 常用项：
@@ -115,6 +142,8 @@ OPENAI_MODEL=gpt-4o-mini
 | `FFMPEG_PATH` / `FFPROBE_PATH` | FFmpeg 不在 PATH 时指定 |
 | `HTTP_PROXY` / `NO_PROXY` | yt-dlp / HTTPX 代理 |
 | `VOLCENGINE_TTS_*` / `AZURE_TTS_*` | 云端 TTS（也可在 Web 设置里配置） |
+
+翻译与 B 站简介生成都走 Web **设置 → OpenAI**（或上述环境变量默认值），无需再单独配置 DeepSeek Key。
 
 ### 4. 启动
 
@@ -140,19 +169,25 @@ npm run dev:api
 npm run dev:web
 ```
 
-浏览器打开 Web 地址，使用上述密码登录即可创建任务。
+浏览器打开 Web，使用上述密码登录。推荐流程：
+
+1. 设置里配置翻译 API、TTS（如需）、并扫码登录 B 站  
+2. 首页粘贴链接或上传本地视频，选择执行模式 / TTS / **B 站分区**  
+3. 在任务详情查看各阶段进度；失败可从失败阶段继续  
 
 ## 项目结构
 
 ```text
 .
 ├── apps/web/                 # Next.js 前端
+│   └── src/app/publish/      # B 站投稿台
 ├── backend/app/              # FastAPI 后端与流水线
+│   └── bilibili/             # 扫码登录 / 暂存 / 元数据 / 上传投稿
 ├── backend/tests/            # 后端测试
 ├── scripts/                  # 辅助脚本（如单次跑流水线）
 ├── submodule/demucs/         # Demucs 子模块
 ├── workfolder/               # 运行时任务数据（gitignore）
-├── data/                     # 模型缓存、日志、SQLite 等（gitignore）
+├── data/                     # 模型缓存、日志、SQLite、B 站 Cookie/staging（gitignore）
 ├── requirements.txt
 ├── requirements-pytorch-cu128.txt
 ├── .env.example
@@ -212,6 +247,15 @@ npm --prefix apps/web run dev -- --webpack
 ```bash
 pip install "datasets>=3,<4"
 ```
+
+**`bilibili_meta` 报「模型返回内容不是合法 JSON」**  
+已增强解析与重试，并带字幕兜底。请更新到最新代码后，在任务详情「从失败阶段继续」。仍异常时检查翻译 API 是否可用、模型是否支持 JSON 输出。
+
+**`bilibili_publish` 失败：未登录**  
+到 **设置 → B 站投稿** 扫码登录后，从投稿阶段继续即可。Cookie 过期需重新扫码。
+
+**Azure TTS 返回空音频**  
+常见于文本与所选音色 locale 不匹配（例如藏文用中文音色）。请在设置中选择匹配的语音，或检查日志中的 Azure 错误详情。
 
 ## 许可
 

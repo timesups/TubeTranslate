@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mocks.push }),
+  usePathname: () => "/",
 }))
 
 vi.mock("@/components/app-header", () => ({
@@ -532,6 +533,7 @@ describe("任务搜索校验错误", () => {
       execution_mode: "auto",
       audio_mode: "keep_bgm",
       tts_provider: "voxcpm",
+      bilibili_tid: 201,
     })
   })
 })

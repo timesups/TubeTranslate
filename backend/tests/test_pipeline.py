@@ -45,7 +45,18 @@ def test_pipeline_marks_all_stages_succeeded(monkeypatch, tmp_path):
     final_path = tmp_path / "video_final.mp4"
     final_path.write_bytes(b"mp4")
 
-    for name in ("_download", "_separate", "_asr", "_asr_fix", "_translate", "_split_audio", "_tts", "_merge_audio"):
+    for name in (
+        "_download",
+        "_separate",
+        "_asr",
+        "_asr_fix",
+        "_translate",
+        "_split_audio",
+        "_tts",
+        "_merge_audio",
+        "_bilibili_meta",
+        "_bilibili_publish",
+    ):
         monkeypatch.setattr(PipelineRunner, name, _noop_stage)
 
     def merge_video(self, task):
@@ -58,8 +69,8 @@ def test_pipeline_marks_all_stages_succeeded(monkeypatch, tmp_path):
 
     assert task["status"] == "succeeded"
     assert task["final_video_path"] == str(final_path)
-    assert [stage["status"] for stage in task["stages"]] == ["succeeded"] * 9
-    assert [stage["progress"] for stage in task["stages"]] == [100] * 9
+    assert [stage["status"] for stage in task["stages"]] == ["succeeded"] * len(STAGES)
+    assert [stage["progress"] for stage in task["stages"]] == [100] * len(STAGES)
 
 
 def test_pipeline_skips_already_succeeded_stages(monkeypatch, tmp_path):
@@ -110,17 +121,38 @@ def test_pipeline_skips_already_succeeded_stages(monkeypatch, tmp_path):
         visited.append("_merge_video")
         self.artifacts.final_video = final_path
 
+    def bilibili_meta(self, task):
+        visited.append("_bilibili_meta")
+        meta = session / "metadata" / "bilibili_meta.json"
+        meta.write_text("{}", encoding="utf-8")
+        self.artifacts.bilibili_meta = meta
+
+    def bilibili_publish(self, task):
+        visited.append("_bilibili_publish")
+        out = session / "metadata" / "bilibili_publish.json"
+        out.write_text("{}", encoding="utf-8")
+        self.artifacts.bilibili_publish = out
+
     monkeypatch.setattr(PipelineRunner, "_asr_fix", asr_fix)
     monkeypatch.setattr(PipelineRunner, "_translate", translate)
     monkeypatch.setattr(PipelineRunner, "_split_audio", split_audio)
     monkeypatch.setattr(PipelineRunner, "_tts", tts)
     monkeypatch.setattr(PipelineRunner, "_merge_audio", merge_audio)
     monkeypatch.setattr(PipelineRunner, "_merge_video", merge_video)
+    monkeypatch.setattr(PipelineRunner, "_bilibili_meta", bilibili_meta)
+    monkeypatch.setattr(PipelineRunner, "_bilibili_publish", bilibili_publish)
 
     PipelineRunner(task_id).run()
 
     assert visited == [
-        "_asr_fix", "_translate", "_split_audio", "_tts", "_merge_audio", "_merge_video",
+        "_asr_fix",
+        "_translate",
+        "_split_audio",
+        "_tts",
+        "_merge_audio",
+        "_merge_video",
+        "_bilibili_meta",
+        "_bilibili_publish",
     ]
     task = database.get_task(task_id)
     assert task["status"] == "succeeded"
@@ -280,12 +312,23 @@ def test_pipeline_manual_completes_immediately_after_final_stage(monkeypatch, tm
                 self.artifacts.timings_file = session / "metadata" / "timings.json"
             elif stage_name == "merge_video":
                 self.artifacts.final_video = final_path
+            elif stage_name == "bilibili_meta":
+                meta = session / "metadata" / "bilibili_meta.json"
+                meta.write_text("{}", encoding="utf-8")
+                self.artifacts.bilibili_meta = meta
+                self.artifacts.final_video = final_path
+            elif stage_name == "bilibili_publish":
+                out = session / "metadata" / "bilibili_publish.json"
+                out.write_text("{}", encoding="utf-8")
+                self.artifacts.bilibili_publish = out
+                self.artifacts.final_video = final_path
 
         return handler
 
     for stage in STAGES:
         monkeypatch.setattr(PipelineRunner, f"_{stage.name}", make_stage_handler(stage.name))
 
+    merge_index = [stage.name for stage in STAGES].index("merge_video")
     for index, stage in enumerate(STAGES):
         if index > 0:
             database.queue_task_for_continue(task_id)
@@ -299,7 +342,10 @@ def test_pipeline_manual_completes_immediately_after_final_stage(monkeypatch, tm
         if index < len(STAGES) - 1:
             assert task["status"] == "paused"
             assert task["current_stage"] == stage.name
-            assert task["final_video_path"] is None
+            if index < merge_index:
+                assert task["final_video_path"] is None
+            else:
+                assert task["final_video_path"] == str(final_path)
             assert task["completed_at"] is None
         else:
             assert task["status"] == "succeeded"
@@ -311,7 +357,7 @@ def test_pipeline_manual_completes_immediately_after_final_stage(monkeypatch, tm
     assert [stage["progress"] for stage in task["stages"]] == [100] * len(STAGES)
     log_content = database.log_path(task_id).read_text(encoding="utf-8")
     assert "Task succeeded" in log_content
-    assert "Paused after [merge_video]" not in log_content
+    assert "Paused after [bilibili_publish]" not in log_content
 
 
 def test_pipeline_manual_switch_to_auto_runs_remaining_stages(monkeypatch, tmp_path):
@@ -335,7 +381,17 @@ def test_pipeline_manual_switch_to_auto_runs_remaining_stages(monkeypatch, tmp_p
 
     monkeypatch.setattr(PipelineRunner, "_download", download)
 
-    for name in ("_separate", "_asr", "_asr_fix", "_translate", "_split_audio", "_tts", "_merge_audio"):
+    for name in (
+        "_separate",
+        "_asr",
+        "_asr_fix",
+        "_translate",
+        "_split_audio",
+        "_tts",
+        "_merge_audio",
+        "_bilibili_meta",
+        "_bilibili_publish",
+    ):
         monkeypatch.setattr(PipelineRunner, name, _noop_stage)
 
     def merge_video(self, task):
@@ -428,6 +484,8 @@ def test_pipeline_uses_uploaded_srt_and_skips_model_stages(monkeypatch, tmp_path
     monkeypatch.setattr(PipelineRunner, "_tts", tts)
     monkeypatch.setattr(PipelineRunner, "_merge_audio", merge_audio)
     monkeypatch.setattr(PipelineRunner, "_merge_video", merge_video)
+    monkeypatch.setattr(PipelineRunner, "_bilibili_meta", _noop_stage)
+    monkeypatch.setattr(PipelineRunner, "_bilibili_publish", _noop_stage)
 
     PipelineRunner(task_id).run()
 

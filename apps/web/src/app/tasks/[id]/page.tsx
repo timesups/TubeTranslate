@@ -29,10 +29,11 @@ import {
   rerunTask,
   resumeTask,
 } from "@/lib/api"
+import { bilibiliPartitionLabel } from "@/lib/bilibili-partitions"
 import { useI18n } from "@/lib/i18n"
 import { statusBadgeClass } from "@/lib/status"
 import { SerialPollingContext, useSerialPolling } from "@/lib/use-serial-polling"
-import { AppHeader } from "@/components/app-header"
+import { AppShell } from "@/components/app-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -221,22 +222,17 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
 
   if (error && !task) {
     return (
-      <main className="min-h-screen page-bg text-foreground">
-        <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
-          <AppHeader backHref="/" />
-          <Card>
-            <CardContent className="px-6 py-10 text-sm text-red-300">{error}</CardContent>
-          </Card>
-        </div>
-      </main>
+      <AppShell backHref="/">
+        <Card>
+          <CardContent className="px-6 py-10 text-sm text-red-300">{error}</CardContent>
+        </Card>
+      </AppShell>
     )
   }
 
   return (
-    <main className="min-h-screen page-bg text-foreground">
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
-        <AppHeader backHref="/" />
-
+    <AppShell backHref="/">
+      <div className="flex flex-col gap-6">
         <Card>
           <CardHeader className="gap-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -284,6 +280,8 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                       ? t.task.ttsAzure
                       : t.task.ttsVoxcpm}
                 </dd>
+                <dt className="text-muted-foreground">{t.task.bilibiliTid}</dt>
+                <dd>{bilibiliPartitionLabel(task.bilibili_tid ?? 201)}</dd>
                 {task.session_path ? (
                   <>
                     <dt className="text-muted-foreground">{t.task.session}</dt>
@@ -297,7 +295,7 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
           </CardContent>
         </Card>
 
-        {task?.status === "succeeded" && task.final_video_path ? (
+        {task?.final_video_path ? (
           <Card>
             <CardHeader>
               <CardTitle>{t.task.finalVideo}</CardTitle>
@@ -564,6 +562,6 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
           </CardContent>
         </Card>
       </div>
-    </main>
+    </AppShell>
   )
 }

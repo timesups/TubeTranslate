@@ -23,11 +23,12 @@ import {
   resumeTasksBatch,
   uploadLocalTasks,
 } from "@/lib/api"
+import { BILIBILI_PARTITIONS, DEFAULT_BILIBILI_TID } from "@/lib/bilibili-partitions"
 import { useI18n } from "@/lib/i18n"
 import { statusBadgeClass } from "@/lib/status"
 import { SerialPollingContext, useSerialPolling } from "@/lib/use-serial-polling"
 import uploadContract from "@/lib/upload-contract.json"
-import { AppHeader } from "@/components/app-header"
+import { AppShell } from "@/components/app-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -167,6 +168,7 @@ export default function Home() {
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("auto")
   const [audioMode, setAudioMode] = useState<AudioMode>("keep_bgm")
   const [ttsProvider, setTtsProvider] = useState<TtsProvider>("voxcpm")
+  const [bilibiliTid, setBilibiliTid] = useState(DEFAULT_BILIBILI_TID)
   const [tasks, setTasks] = useState<TaskSummary[]>([])
   const [taskTotal, setTaskTotal] = useState(0)
   const [activeTaskCount, setActiveTaskCount] = useState<number | null>(null)
@@ -225,6 +227,15 @@ export default function Home() {
     { value: "volcengine", label: t.home.ttsVolcengine },
     { value: "azure", label: t.home.ttsAzure },
   ]
+
+  const bilibiliPartitionOptions = useMemo(
+    () =>
+      BILIBILI_PARTITIONS.map((part) => ({
+        value: String(part.tid),
+        label: `${part.group} / ${part.name}`,
+      })),
+    [],
+  )
 
   const statusOptions: { value: TaskListStatus; label: string }[] = [
     { value: "all", label: t.home.allStatuses },
@@ -456,6 +467,7 @@ export default function Home() {
           executionMode,
           audioMode,
           ttsProvider,
+          bilibiliTid,
         )
         const createdCount = result.created.length
         const failedCount = result.errors.length
@@ -490,7 +502,7 @@ export default function Home() {
         return
       }
 
-      const result = await createTasksBatch(urls, executionMode, audioMode, ttsProvider)
+      const result = await createTasksBatch(urls, executionMode, audioMode, ttsProvider, bilibiliTid)
       const createdCount = result.created.length
       const existingCount = result.existing.length
       const failedCount = result.errors.length
@@ -542,10 +554,8 @@ export default function Home() {
   const hasTaskFilters = Boolean(taskQuery.trim()) || taskStatus !== "all" || taskExecutionMode !== "all"
 
   return (
-    <main className="min-h-screen page-bg text-foreground">
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
-        <AppHeader />
-
+    <AppShell>
+      <div className="flex flex-col gap-6">
         <Card>
           <CardHeader>
             <CardTitle>{t.home.createTitle}</CardTitle>
@@ -717,6 +727,28 @@ export default function Home() {
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">{t.home.ttsProviderHelp}</p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="bilibili-tid">{t.home.bilibiliTidLabel}</Label>
+                <Select
+                  value={String(bilibiliTid)}
+                  onValueChange={(value) => setBilibiliTid(Number(value || DEFAULT_BILIBILI_TID))}
+                >
+                  <SelectTrigger id="bilibili-tid" className="h-10">
+                    <span className="min-w-0 truncate text-left">
+                      {selectedLabel(bilibiliPartitionOptions, String(bilibiliTid)) ||
+                        t.home.bilibiliTidDefault}
+                    </span>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {bilibiliPartitionOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">{t.home.bilibiliTidHelp}</p>
               </div>
               <div className="flex items-center justify-between gap-3">
                 {activeTaskCount !== null && activeTaskCount > 0 ? (
@@ -1120,6 +1152,6 @@ export default function Home() {
           </CardContent>
         </Card>
       </div>
-    </main>
+    </AppShell>
   )
 }

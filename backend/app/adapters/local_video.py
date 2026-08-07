@@ -227,6 +227,9 @@ def import_local_video(url: str, workfolder: Path, source: SourceConfig) -> tupl
     expected_duration = source_probe.get("duration")
     expected = expected_duration if isinstance(expected_duration, (int, float)) else None
     if _is_usable_output(video_file, expected):
+        from ..bilibili.staging import extract_cover_to_session
+
+        extract_cover_to_session(video_file, session)
         return session, info
     if video_file.exists():
         video_file.unlink(missing_ok=True)
@@ -240,4 +243,8 @@ def import_local_video(url: str, workfolder: Path, source: SourceConfig) -> tupl
         if video_file.exists():
             video_file.unlink(missing_ok=True)
         raise RuntimeError("ffmpeg finished without producing a complete media/video_source.mp4")
+
+    from ..bilibili.staging import extract_cover_to_session
+
+    extract_cover_to_session(video_file, session)
     return session, info

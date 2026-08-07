@@ -102,6 +102,93 @@ def _remove_partial_outputs(video_file: Path) -> None:
             candidate.unlink(missing_ok=True)
 
 
+COVER_SOURCE_NAME = "cover_source.jpg"
+
+
+def _pick_thumbnail_url(info: dict[str, Any]) -> str | None:
+    ranked: list[tuple[int, int, str]] = []
+    for item in info.get("thumbnails") or []:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+        try:
+            width = int(item.get("width") or 0)
+            height = int(item.get("height") or 0)
+        except (TypeError, ValueError):
+            width, height = 0, 0
+        try:
+            preference = int(item.get("preference") or 0)
+        except (TypeError, ValueError):
+            preference = 0
+        ranked.append((width * height, preference, url))
+    if ranked:
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return ranked[0][2]
+    direct = str(info.get("thumbnail") or "").strip()
+    return direct or None
+
+
+def _proxy_dict(proxy_port: str, source: SourceConfig) -> dict[str, str] | None:
+    if not source.use_proxy:
+        return None
+    proxy = _proxy_url(proxy_port)
+    if not proxy:
+        return None
+    return {"http": proxy, "https": proxy}
+
+
+def _save_cover_jpeg(image_bytes: bytes, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from PIL import Image
+        import io
+
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            rgb = image.convert("RGB")
+            rgb.save(dest, format="JPEG", quality=92, optimize=True)
+    except Exception:
+        # Fall back to raw bytes when Pillow cannot decode (rare for platform thumbs).
+        dest.write_bytes(image_bytes)
+    if not dest.exists() or dest.stat().st_size <= 0:
+        raise RuntimeError("Failed to write original video cover image")
+
+
+def download_original_cover(
+    info: dict[str, Any],
+    media_dir: Path,
+    source: SourceConfig,
+    proxy_port: str = "",
+) -> Path | None:
+    """Download the platform thumbnail into media/cover_source.jpg when available."""
+    dest = media_dir / COVER_SOURCE_NAME
+    if dest.exists() and dest.stat().st_size > 0:
+        return dest
+
+    url = _pick_thumbnail_url(info)
+    if not url:
+        return None
+
+    headers = {"User-Agent": DEFAULT_USER_AGENT, "Referer": str(info.get("webpage_url") or url)}
+    try:
+        response = requests.get(
+            url,
+            headers=headers,
+            proxies=_proxy_dict(proxy_port, source),
+            timeout=30,
+        )
+        response.raise_for_status()
+        if not response.content:
+            return None
+        _save_cover_jpeg(response.content, dest)
+    except Exception:
+        if dest.exists():
+            dest.unlink(missing_ok=True)
+        return None
+    return dest if dest.exists() and dest.stat().st_size > 0 else None
+
+
 def _download_with_format_candidates(
     url: str, video_file: Path, source: SourceConfig, proxy_port: str
 ) -> None:
@@ -153,6 +240,11 @@ def download_video(
     video_file = media_dir / "video_source.mp4"
     metadata_file = metadata_dir / "ytdlp_info.json"
     metadata_file.write_text(json.dumps(ydl.sanitize_info(info), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    cover = download_original_cover(info, media_dir, source, proxy_port)
+    if cover is None:
+        # Keep going; staging can fall back to a frame grab later.
+        pass
 
     if video_file.exists() and video_file.stat().st_size > 0:
         return session, info

@@ -153,6 +153,7 @@ def test_synthesize_speech_posts_ssml(monkeypatch, tmp_path):
         content = mp3_bytes
         text = ""
         reason_phrase = "OK"
+        headers = {"content-type": "audio/mpeg"}
 
         def raise_for_status(self):
             return None
@@ -182,6 +183,120 @@ def test_synthesize_speech_posts_ssml(monkeypatch, tmp_path):
     assert captured["headers"]["Ocp-Apim-Subscription-Key"] == "azure-key"
     assert b"zh-CN-XiaoxiaoNeural" in captured["content"]
     assert "你好".encode("utf-8") in captured["content"]
+
+
+def test_synthesize_speech_skips_punctuation_only(monkeypatch):
+    called = {"n": 0}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            called["n"] += 1
+            raise AssertionError("punctuation-only text should not call Azure")
+
+    monkeypatch.setattr(azure_tts.httpx, "Client", FakeClient)
+    segment = azure_tts.synthesize_speech(
+        "……！！",
+        {"subscription_key": "azure-key", "voice": "zh-CN-XiaoxiaoNeural"},
+    )
+    assert isinstance(segment, AudioSegment)
+    assert len(segment) == azure_tts._SILENT_CLIP_MS
+    assert called["n"] == 0
+
+
+def test_synthesize_speech_skips_tibetan_with_zh_voice(monkeypatch):
+    called = {"n": 0}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            called["n"] += 1
+            raise AssertionError("Tibetan text should not call zh-CN Azure voice")
+
+    monkeypatch.setattr(azure_tts.httpx, "Client", FakeClient)
+    segment = azure_tts.synthesize_speech(
+        "ཟ ཟ ཟ ེད ཟ ཟ ཙད ཚའ",
+        {
+            "subscription_key": "azure-key",
+            "voice": "zh-CN-XiaoxiaoNeural",
+            "locale": "zh-CN",
+        },
+    )
+    assert isinstance(segment, AudioSegment)
+    assert len(segment) == azure_tts._SILENT_CLIP_MS
+    assert called["n"] == 0
+
+
+def test_is_speakable_accepts_chinese_and_english():
+    assert azure_tts._is_speakable("你好世界", voice="zh-CN-XiaoxiaoNeural", locale="zh-CN")
+    assert azure_tts._is_speakable("Hello world", voice="zh-CN-XiaoxiaoNeural", locale="zh-CN")
+    assert not azure_tts._is_speakable("ཟེདཙད", voice="zh-CN-XiaoxiaoNeural", locale="zh-CN")
+    assert not azure_tts._is_speakable("……", voice="zh-CN-XiaoxiaoNeural", locale="zh-CN")
+
+
+def test_request_speech_retries_empty_audio(monkeypatch):
+    audio = AudioSegment.silent(duration=200, frame_rate=24000)
+    buffer = io.BytesIO()
+    audio.export(buffer, format="mp3")
+    mp3_bytes = buffer.getvalue()
+    attempts = {"n": 0}
+    sleeps: list[float] = []
+
+    class FakeResponse:
+        def __init__(self, content: bytes):
+            self.status_code = 200
+            self.content = content
+            self.text = ""
+            self.reason_phrase = "OK"
+            self.headers = {"content-type": "audio/mpeg", "x-request-id": "req-1"}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] < 2:
+                return FakeResponse(b"")
+            return FakeResponse(mp3_bytes)
+
+    monkeypatch.setattr(azure_tts.httpx, "Client", FakeClient)
+    monkeypatch.setattr(azure_tts.time, "sleep", sleeps.append)
+    segment = azure_tts._request_speech(
+        "你好世界",
+        {
+            "subscription_key": "azure-key",
+            "region": "eastasia",
+            "voice": "zh-CN-XiaoxiaoNeural",
+            "locale": "zh-CN",
+            "output_format": "audio-24khz-48kbitrate-mono-mp3",
+        },
+    )
+    assert isinstance(segment, AudioSegment)
+    assert attempts["n"] == 2
+    assert sleeps == [2.0]
 
 
 def test_generate_tts_respects_concurrency(monkeypatch, tmp_path):

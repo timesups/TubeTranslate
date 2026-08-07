@@ -140,6 +140,8 @@ def test_pipeline_exports_video_and_subtitle_on_success(monkeypatch, tmp_path):
         "_split_audio",
         "_tts",
         "_merge_audio",
+        "_bilibili_meta",
+        "_bilibili_publish",
     ):
         monkeypatch.setattr(PipelineRunner, name, lambda self, task: None)
     monkeypatch.setattr(PipelineRunner, "_merge_video", merge_video)

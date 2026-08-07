@@ -46,6 +46,8 @@ class PipelineArtifacts:
     dubbing_file: Path | None = None
     timings_file: Path | None = None
     final_video: Path | None = None
+    bilibili_meta: Path | None = None
+    bilibili_publish: Path | None = None
 
 
 def _write_log(task_id: str, message: str) -> None:
@@ -83,6 +85,8 @@ class PipelineRunner:
             "tts": self._tts,
             "merge_audio": self._merge_audio,
             "merge_video": self._merge_video,
+            "bilibili_meta": self._bilibili_meta,
+            "bilibili_publish": self._bilibili_publish,
         }
 
     def run(self) -> None:
@@ -128,7 +132,6 @@ class PipelineRunner:
                 final_video_path=str(final_video),
                 completed_at=database.now_iso(),
             )
-            self._export_final_video(final_video)
             self.log("Task succeeded")
         except Exception as exc:
             current = database.get_task(self.task_id)
@@ -179,6 +182,27 @@ class PipelineRunner:
             self.log(f"Exported Chinese subtitles -> {exported.subtitle}")
         else:
             self.log("Chinese subtitles were not found; skipped subtitle export")
+
+    def _stage_bilibili_package(self, final_video: Path) -> None:
+        from .bilibili.staging import prepare_task_staging
+
+        task = database.get_task(self.task_id) or {}
+        package = prepare_task_staging(
+            task_id=self.task_id,
+            title=task.get("title"),
+            final_video=final_video,
+            session=self.artifacts.session,
+        )
+        self.log(f"Bilibili staging video -> {package.video}")
+        if package.subtitle is not None:
+            self.log(f"Bilibili staging subtitle -> {package.subtitle}")
+        else:
+            self.log("Bilibili staging subtitle missing")
+        if package.cover is not None:
+            self.log(f"Bilibili staging cover -> {package.cover}")
+        else:
+            self.log("Bilibili staging cover missing")
+        return package
 
     def stage_message(self, stage: str, message: str) -> None:
         database.update_stage(self.task_id, stage, last_message=message)
@@ -248,6 +272,9 @@ class PipelineRunner:
         )
         self.stage_message(stage, "Started")
         self._stage_handlers[stage](database.get_task(self.task_id))
+        if stage == "merge_video" and self.artifacts.final_video is not None:
+            database.update_task(self.task_id, final_video_path=str(self.artifacts.final_video))
+            self._export_final_video(self.artifacts.final_video)
         database.update_stage(
             self.task_id,
             stage,
@@ -305,6 +332,22 @@ class PipelineRunner:
         if stage == "merge_video":
             self.artifacts.final_video = _require_existing(session / "media" / "video_final.mp4", "final_video")
             return
+        if stage == "bilibili_meta":
+            self.artifacts.final_video = _require_existing(session / "media" / "video_final.mp4", "final_video")
+            self.artifacts.bilibili_meta = _require_existing(
+                session / "metadata" / "bilibili_meta.json",
+                "bilibili_meta",
+            )
+            return
+        if stage == "bilibili_publish":
+            self.artifacts.final_video = _require_existing(session / "media" / "video_final.mp4", "final_video")
+            self.artifacts.bilibili_meta = _require_existing(
+                session / "metadata" / "bilibili_meta.json",
+                "bilibili_meta",
+            )
+            publish_path = session / "metadata" / "bilibili_publish.json"
+            self.artifacts.bilibili_publish = publish_path if publish_path.exists() else None
+            return
         raise RuntimeError(f"Unknown pipeline stage: {stage}")
 
     def _download(self, task: dict) -> None:
@@ -322,7 +365,14 @@ class PipelineRunner:
         self.artifacts.video_file = session / "media" / "video_source.mp4"
         title = (info.get("title") or "").strip() or None
         database.update_task(self.task_id, session_path=str(session), title=title)
-        self.stage_message("download", f"[{source.name}] {title or 'Downloaded'} -> {session}")
+        cover = session / "media" / "cover_source.jpg"
+        if cover.exists() and cover.stat().st_size > 0:
+            self.stage_message(
+                "download",
+                f"[{source.name}] {title or 'Downloaded'} -> {session} (cover saved)",
+            )
+        else:
+            self.stage_message("download", f"[{source.name}] {title or 'Downloaded'} -> {session}")
 
     def _separate(self, task: dict) -> None:
         session = _require(self.artifacts.session, "session")
@@ -574,6 +624,130 @@ class PipelineRunner:
         self.stage_message(
             "merge_video",
             f"Final video: {self.artifacts.final_video} ({size_mb:.1f} MB, {mode_note})",
+        )
+
+    def _bilibili_meta(self, task: dict) -> None:
+        import asyncio
+
+        from .bilibili.deepseek_meta import generate_bilibili_meta, load_settings
+        from .bilibili.media_scan import read_srt
+
+        session = _require(self.artifacts.session, "session")
+        final_video = self.artifacts.final_video
+        if final_video is None and task.get("final_video_path"):
+            final_video = Path(task["final_video_path"])
+        final_video = _require_existing(_require(final_video, "final_video"), "final_video")
+        self.artifacts.final_video = final_video
+
+        self.stage_progress("bilibili_meta", 10, "Preparing staging package", force=True)
+        package = self._stage_bilibili_package(final_video)
+        if package.cover is None or not package.cover.exists():
+            raise RuntimeError("Bilibili cover is missing; cannot generate publish metadata")
+        if package.subtitle is None or not package.subtitle.exists():
+            raise RuntimeError("Chinese subtitle is missing; cannot generate Bilibili description")
+
+        self.stage_progress("bilibili_meta", 40, "Generating title and description", force=True)
+        subtitle_text = read_srt(package.subtitle)
+        if not subtitle_text.strip():
+            raise RuntimeError("Subtitle file is empty; cannot generate Bilibili description")
+
+        meta = asyncio.run(
+            generate_bilibili_meta(
+                filename=package.video.name,
+                subtitle_text=subtitle_text,
+            )
+        )
+        settings = load_settings()
+        payload = {
+            "title": meta["title"],
+            "desc": meta["desc"],
+            "tag": meta["tag_str"],
+            "dynamic": meta.get("dynamic") or "",
+            "tid": int(
+                task.get("bilibili_tid")
+                or settings.get("default_tid")
+                or 201
+            ),
+            "copyright": int(settings.get("default_copyright") or 1),
+            "source": "",
+            "video_path": str(package.video),
+            "cover_path": str(package.cover),
+            "srt_path": str(package.subtitle),
+            "stem": package.stem,
+        }
+        out = session / "metadata" / "bilibili_meta.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.artifacts.bilibili_meta = out
+        self.stage_message("bilibili_meta", f"Generated title: {payload['title'][:60]}")
+
+    def _bilibili_publish(self, task: dict) -> None:
+        import asyncio
+
+        from .bilibili import auth
+        from .bilibili.uploader import UploadMeta, create_job, run_upload_job
+
+        session = _require(self.artifacts.session, "session")
+        meta_path = self.artifacts.bilibili_meta
+        if meta_path is None:
+            meta_path = session / "metadata" / "bilibili_meta.json"
+        meta_path = _require_existing(meta_path, "bilibili_meta")
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+
+        video_path = Path(str(payload.get("video_path") or ""))
+        cover_path = Path(str(payload.get("cover_path") or ""))
+        if not video_path.exists():
+            raise RuntimeError(f"Staged Bilibili video missing: {video_path}")
+        if not cover_path.exists():
+            raise RuntimeError(f"Staged Bilibili cover missing: {cover_path}")
+
+        self.stage_progress("bilibili_publish", 5, "Checking Bilibili login", force=True)
+        status = asyncio.run(auth.get_login_status())
+        if not status.get("logged_in"):
+            raise RuntimeError("Bilibili account is not logged in; scan QR code in Settings first")
+
+        upload_meta = UploadMeta(
+            title=str(payload.get("title") or "").strip(),
+            tid=int(payload.get("tid") or 201),
+            tag=str(payload.get("tag") or "配音"),
+            desc=str(payload.get("desc") or "").strip(),
+            copyright=int(payload.get("copyright") or 1),
+            source=str(payload.get("source") or ""),
+            cover_path=cover_path,
+            dynamic=str(payload.get("dynamic") or ""),
+        )
+        if not upload_meta.title:
+            raise RuntimeError("Bilibili title is empty")
+        if not upload_meta.desc:
+            raise RuntimeError("Bilibili description is empty")
+
+        job = create_job()
+
+        async def _run() -> dict:
+            original_publish = job.publish
+
+            async def publish_and_report() -> None:
+                await original_publish()
+                self.stage_progress(
+                    "bilibili_publish",
+                    int(job.progress),
+                    job.message or "Uploading",
+                )
+
+            job.publish = publish_and_report  # type: ignore[method-assign]
+            await run_upload_job(job, video_path, upload_meta, cleanup=False)
+            if job.status != "success":
+                raise RuntimeError(job.error or job.message or "Bilibili publish failed")
+            return job.result or {}
+
+        result = asyncio.run(_run())
+        out = session / "metadata" / "bilibili_publish.json"
+        out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.artifacts.bilibili_publish = out
+        bvid = result.get("bvid")
+        self.stage_message(
+            "bilibili_publish",
+            f"Published: {bvid}" if bvid else "Published to Bilibili",
         )
 
 

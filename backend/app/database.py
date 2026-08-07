@@ -26,6 +26,7 @@ AUDIO_MODES = ("keep_bgm", "replace")
 DEFAULT_AUDIO_MODE = "keep_bgm"
 TTS_PROVIDERS = ("voxcpm", "volcengine", "azure")
 DEFAULT_TTS_PROVIDER = "voxcpm"
+DEFAULT_BILIBILI_TID = 201  # 知识区 · 科学科普
 
 
 def now_iso() -> str:
@@ -66,7 +67,8 @@ def init_db() -> None:
               completed_at TEXT,
               execution_mode TEXT NOT NULL DEFAULT 'auto',
               audio_mode TEXT NOT NULL DEFAULT 'keep_bgm',
-              tts_provider TEXT NOT NULL DEFAULT 'voxcpm'
+              tts_provider TEXT NOT NULL DEFAULT 'voxcpm',
+              bilibili_tid INTEGER NOT NULL DEFAULT 201
             );
 
             CREATE TABLE IF NOT EXISTS task_stages (
@@ -147,10 +149,43 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE tasks ADD COLUMN tts_provider TEXT NOT NULL DEFAULT 'voxcpm'"
             )
+        if "bilibili_tid" not in task_columns:
+            conn.execute(
+                "ALTER TABLE tasks ADD COLUMN bilibili_tid INTEGER NOT NULL DEFAULT 201"
+            )
         stage_columns = {row["name"] for row in conn.execute("PRAGMA table_info(task_stages)").fetchall()}
         if "progress" not in stage_columns:
             conn.execute("ALTER TABLE task_stages ADD COLUMN progress INTEGER")
 
+        # Ensure newly added pipeline stages exist for older tasks.
+        task_rows = conn.execute("SELECT id, status FROM tasks").fetchall()
+        for task_row in task_rows:
+            task_id = task_row["id"]
+            existing = {
+                row["name"]
+                for row in conn.execute(
+                    "SELECT name FROM task_stages WHERE task_id = ?",
+                    (task_id,),
+                ).fetchall()
+            }
+            legacy_done = task_row["status"] == "succeeded"
+            for stage in STAGES:
+                if stage.name in existing:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO task_stages (task_id, name, label, status, progress, last_message)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_id,
+                        stage.name,
+                        stage.label,
+                        "succeeded" if legacy_done else "pending",
+                        100 if legacy_done else None,
+                        "Skipped for legacy completed task" if legacy_done else None,
+                    ),
+                )
 
 def create_auth_session(
     *,
@@ -334,6 +369,12 @@ def normalize_tts_provider(value: str | None) -> str:
     return provider
 
 
+def normalize_bilibili_tid(value: int | str | None) -> int:
+    from .bilibili.partitions import normalize_bilibili_tid as _normalize
+
+    return _normalize(value)
+
+
 def create_task(
     url: str,
     task_id: str | None = None,
@@ -341,20 +382,22 @@ def create_task(
     execution_mode: str = DEFAULT_EXECUTION_MODE,
     audio_mode: str = DEFAULT_AUDIO_MODE,
     tts_provider: str = DEFAULT_TTS_PROVIDER,
+    bilibili_tid: int = DEFAULT_BILIBILI_TID,
 ) -> str:
     new_id = task_id or str(uuid.uuid4())
     created_at = now_iso()
     mode = normalize_execution_mode(execution_mode)
     resolved_audio_mode = normalize_audio_mode(audio_mode)
     resolved_tts_provider = normalize_tts_provider(tts_provider)
+    resolved_tid = normalize_bilibili_tid(bilibili_tid)
     with connect() as conn:
         conn.execute(
             """
             INSERT INTO tasks (
               id, url, status, current_stage, created_at,
-              execution_mode, audio_mode, tts_provider
+              execution_mode, audio_mode, tts_provider, bilibili_tid
             )
-            VALUES (?, ?, 'queued', ?, ?, ?, ?, ?)
+            VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?)
             """,
             (
                 new_id,
@@ -364,6 +407,7 @@ def create_task(
                 mode,
                 resolved_audio_mode,
                 resolved_tts_provider,
+                resolved_tid,
             ),
         )
         conn.executemany(
@@ -403,7 +447,7 @@ def latest_task_id() -> str | None:
 
 TASK_SUMMARY_COLUMNS = (
     "id, url, title, status, current_stage, final_video_path, error_message, "
-    "created_at, started_at, completed_at, execution_mode, audio_mode, tts_provider"
+    "created_at, started_at, completed_at, execution_mode, audio_mode, tts_provider, bilibili_tid"
 )
 
 TASK_LIST_SORTS = {
@@ -508,21 +552,16 @@ def get_task(task_id: str) -> dict[str, Any] | None:
         task = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if not task:
             return None
+        order_cases = "\n".join(
+            f"WHEN '{stage.name}' THEN {index}" for index, stage in enumerate(STAGES, start=1)
+        )
         stages = conn.execute(
-            """
+            f"""
             SELECT * FROM task_stages
             WHERE task_id = ?
             ORDER BY
               CASE name
-                WHEN 'download' THEN 1
-                WHEN 'separate' THEN 2
-                WHEN 'asr' THEN 3
-                WHEN 'asr_fix' THEN 4
-                WHEN 'translate' THEN 5
-                WHEN 'split_audio' THEN 6
-                WHEN 'tts' THEN 7
-                WHEN 'merge_audio' THEN 8
-                WHEN 'merge_video' THEN 9
+                {order_cases}
                 ELSE 99
               END
             """,
@@ -564,6 +603,7 @@ def reset_stages_from(task_id: str, from_stage: str) -> None:
         raise ValueError(f"Unknown stage: {from_stage}")
 
     start = STAGE_NAMES.index(from_stage)
+    clear_final_video = STAGE_NAMES.index(from_stage) <= STAGE_NAMES.index("merge_video")
     with connect() as conn:
         for stage in STAGE_NAMES[start:]:
             conn.execute(
@@ -575,15 +615,26 @@ def reset_stages_from(task_id: str, from_stage: str) -> None:
                 """,
                 (task_id, stage),
             )
-        conn.execute(
-            """
-            UPDATE tasks
-            SET status = 'queued', current_stage = ?, final_video_path = NULL,
-                completed_at = NULL, error_message = NULL
-            WHERE id = ?
-            """,
-            (from_stage, task_id),
-        )
+        if clear_final_video:
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = 'queued', current_stage = ?, final_video_path = NULL,
+                    completed_at = NULL, error_message = NULL
+                WHERE id = ?
+                """,
+                (from_stage, task_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = 'queued', current_stage = ?,
+                    completed_at = NULL, error_message = NULL
+                WHERE id = ?
+                """,
+                (from_stage, task_id),
+            )
 
 
 def reset_failed_for_resume(task_id: str) -> None:

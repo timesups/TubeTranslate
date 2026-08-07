@@ -117,6 +117,7 @@ export type Task = {
   execution_mode: ExecutionMode
   audio_mode?: AudioMode
   tts_provider?: TtsProvider
+  bilibili_tid?: number
   stages: TaskStage[]
 }
 
@@ -239,6 +240,8 @@ export type TaskSummary = {
   completed_at: string | null
   execution_mode?: ExecutionMode
   audio_mode?: AudioMode
+  tts_provider?: TtsProvider
+  bilibili_tid?: number
 }
 
 export type TaskListStatus = "all" | TaskStatus
@@ -394,6 +397,7 @@ export function createTask(
   executionMode: ExecutionMode = "auto",
   audioMode: AudioMode = "keep_bgm",
   ttsProvider: TtsProvider = "voxcpm",
+  bilibiliTid: number = 201,
 ) {
   return request<Task>("/api/tasks", {
     method: "POST",
@@ -402,6 +406,7 @@ export function createTask(
       execution_mode: executionMode,
       audio_mode: audioMode,
       tts_provider: ttsProvider,
+      bilibili_tid: bilibiliTid,
     }),
   })
 }
@@ -411,6 +416,7 @@ export function createTasksBatch(
   executionMode: ExecutionMode = "auto",
   audioMode: AudioMode = "keep_bgm",
   ttsProvider: TtsProvider = "voxcpm",
+  bilibiliTid: number = 201,
 ) {
   return request<TaskBatchResult>("/api/tasks/batch", {
     method: "POST",
@@ -419,6 +425,7 @@ export function createTasksBatch(
       execution_mode: executionMode,
       audio_mode: audioMode,
       tts_provider: ttsProvider,
+      bilibili_tid: bilibiliTid,
     }),
   })
 }
@@ -430,6 +437,7 @@ export async function uploadLocalTask(
   executionMode: ExecutionMode = "auto",
   audioMode: AudioMode = "keep_bgm",
   ttsProvider: TtsProvider = "voxcpm",
+  bilibiliTid: number = 201,
 ) {
   const form = new FormData()
   form.append("direction", direction)
@@ -440,6 +448,7 @@ export async function uploadLocalTask(
   form.append("execution_mode", executionMode)
   form.append("audio_mode", audioMode)
   form.append("tts_provider", ttsProvider)
+  form.append("bilibili_tid", String(bilibiliTid))
 
   const options: RequestInit = {
     method: "POST",
@@ -471,6 +480,7 @@ export async function uploadLocalTasks(
   executionMode: ExecutionMode = "auto",
   audioMode: AudioMode = "keep_bgm",
   ttsProvider: TtsProvider = "voxcpm",
+  bilibiliTid: number = 201,
 ): Promise<LocalUploadBatchResult> {
   const created: Task[] = []
   const errors: LocalUploadBatchError[] = []
@@ -485,6 +495,7 @@ export async function uploadLocalTasks(
         executionMode,
         audioMode,
         ttsProvider,
+        bilibiliTid,
       )
       created.push(task)
     } catch (err) {
@@ -620,4 +631,159 @@ export function finalVideoUrl(taskId: string) {
 
 export function finalVideoDownloadUrl(taskId: string) {
   return `/api/tasks/${taskId}/artifact/final-video?download=1`
+}
+
+export type BilibiliAuthStatus = {
+  logged_in: boolean
+  message?: string
+  uname?: string
+  mid?: number
+  face?: string
+  level?: number
+}
+
+export type BilibiliSettings = {
+  default_tid: number
+  default_tag: string
+  default_copyright: number
+  video_dir: string
+}
+
+export type BilibiliPartition = { tid: number; name: string; group?: string }
+
+export type BilibiliReadyItem = {
+  id: string
+  name: string
+  stem: string
+  video_path: string
+  cover_path: string | null
+  srt_path: string | null
+  has_cover: boolean
+  has_srt: boolean
+  size: number
+  ready: boolean
+}
+
+export type BilibiliDraft = {
+  id: string
+  name: string
+  cover_path: string | null
+  srt_path: string | null
+  title: string
+  desc: string
+  tag: string
+  dynamic: string
+  tid: number
+  copyright: number
+}
+
+export type BilibiliJob = {
+  id: string
+  status: string
+  progress: number
+  message: string
+  result?: { aid?: number; bvid?: string } | null
+  error?: string | null
+}
+
+export function getBilibiliAuthStatus() {
+  return request<BilibiliAuthStatus>("/api/bilibili/auth/status")
+}
+
+export function saveBilibiliCookie(cookie: string) {
+  return request<BilibiliAuthStatus>("/api/bilibili/auth/cookie", {
+    method: "POST",
+    body: JSON.stringify({ cookie }),
+  })
+}
+
+export function logoutBilibili() {
+  return request<{ ok: boolean }>("/api/bilibili/auth/logout", { method: "DELETE" })
+}
+
+export function createBilibiliQr() {
+  return request<{ qrcode_key: string; url: string; image: string }>(
+    "/api/bilibili/auth/qr/create",
+    { method: "POST" },
+  )
+}
+
+export function pollBilibiliQr(qrcodeKey: string) {
+  return request<BilibiliAuthStatus & { code: number; message: string }>(
+    "/api/bilibili/auth/qr/poll",
+    {
+      method: "POST",
+      body: JSON.stringify({ qrcode_key: qrcodeKey }),
+    },
+  )
+}
+
+export function getBilibiliSettings() {
+  return request<BilibiliSettings>("/api/bilibili/settings")
+}
+
+export function saveBilibiliSettings(settings: {
+  default_tid?: number
+  default_tag?: string
+  default_copyright?: number
+  video_dir?: string
+}) {
+  return request<BilibiliSettings>("/api/bilibili/settings", {
+    method: "POST",
+    body: JSON.stringify(settings),
+  })
+}
+
+export function getBilibiliPartitions() {
+  return request<BilibiliPartition[]>("/api/bilibili/partitions")
+}
+
+export function listBilibiliReady() {
+  return request<{ video_dir: string; count: number; items: BilibiliReadyItem[] }>(
+    "/api/bilibili/ready",
+  )
+}
+
+export function stageTaskForBilibili(taskId: string) {
+  return request<{
+    id: string
+    stem: string
+    video_path: string
+    srt_path: string | null
+    cover_path: string | null
+    ready: boolean
+  }>("/api/bilibili/stage-from-task", {
+    method: "POST",
+    body: JSON.stringify({ task_id: taskId }),
+  })
+}
+
+export function generateBilibiliMeta(id: string) {
+  return request<BilibiliDraft>("/api/bilibili/generate", {
+    method: "POST",
+    body: JSON.stringify({ id }),
+  })
+}
+
+export function publishBilibili(items: {
+  id: string
+  title: string
+  desc: string
+  tag: string
+  dynamic?: string
+  tid?: number
+  copyright?: number
+  source?: string
+}[]) {
+  return request<{ jobs: Array<{ id: string; job_id: string } & BilibiliJob> }>(
+    "/api/bilibili/publish",
+    {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    },
+  )
+}
+
+export function getBilibiliJob(jobId: string) {
+  return request<BilibiliJob>(`/api/bilibili/jobs/${jobId}`)
 }

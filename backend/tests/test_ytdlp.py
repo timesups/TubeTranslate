@@ -99,6 +99,7 @@ def test_download_video_passes_only_the_canonical_url_to_both_ytdlp_sinks(
                 "uploader": "tester",
                 "title": "canonical",
                 "webpage_url": url,
+                "thumbnail": "https://i.ytimg.com/vi/abcdefghijk/maxresdefault.jpg",
             }
 
         def sanitize_info(self, info):
@@ -108,7 +109,18 @@ def test_download_video_passes_only_the_canonical_url_to_both_ytdlp_sinks(
             downloaded_urls.extend(urls)
             Path(self.options["outtmpl"]).write_bytes(b"video")
 
+    class FakeResponse:
+        content = b"\xff\xd8\xffcover"
+        def raise_for_status(self):
+            return None
+
     monkeypatch.setattr(ytdlp.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+    monkeypatch.setattr(ytdlp.requests, "get", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(
+        ytdlp,
+        "_save_cover_jpeg",
+        lambda image_bytes, dest: dest.write_bytes(image_bytes),
+    )
 
     session, _ = ytdlp.download_video(
         "HTTPS://WWW.YOUTUBE.COM:443/watch?v=abcdefghijk",
@@ -120,6 +132,20 @@ def test_download_video_passes_only_the_canonical_url_to_both_ytdlp_sinks(
     assert extracted_urls == [expected]
     assert downloaded_urls == [expected]
     assert (session / "media" / "video_source.mp4").read_bytes() == b"video"
+    assert (session / "media" / "cover_source.jpg").read_bytes() == b"\xff\xd8\xffcover"
+
+
+def test_pick_thumbnail_url_prefers_largest():
+    url = ytdlp._pick_thumbnail_url(
+        {
+            "thumbnail": "https://example.com/small.jpg",
+            "thumbnails": [
+                {"url": "https://example.com/a.jpg", "width": 120, "height": 90},
+                {"url": "https://example.com/b.jpg", "width": 1280, "height": 720},
+            ],
+        }
+    )
+    assert url == "https://example.com/b.jpg"
 
 
 def test_download_video_rejects_deceptive_url_before_cookie_or_ytdlp(
