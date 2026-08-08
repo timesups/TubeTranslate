@@ -241,10 +241,16 @@ def _chat_completion(client: Any, *, model: str, system: str, user: str, use_jso
             {"role": "user", "content": user},
         ],
         "temperature": 0.3,
+        # deepseek-v4 thinks by default; JSON mode then often returns empty/"{}".
+        "extra_body": {"thinking": {"type": "disabled"}},
     }
     if use_json_format:
         kwargs["response_format"] = {"type": "json_object"}
-    return client.chat.completions.create(**kwargs)
+    try:
+        return client.chat.completions.create(**kwargs)
+    except Exception:
+        kwargs.pop("extra_body", None)
+        return client.chat.completions.create(**kwargs)
 
 
 def _generate_sync(*, filename: str, subtitle_text: str) -> dict[str, Any]:

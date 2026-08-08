@@ -191,13 +191,17 @@ def test_translate_batch_does_not_replace_em_dash_for_en_target(monkeypatch):
 
 
 def test_translate_batch_uses_shared_system_prompt(monkeypatch):
-    captured: list[str] = []
+    captured_systems: list[str] = []
+    captured_users: list[str] = []
     lock = __import__("threading").Lock()
 
     def fake_call_json(client, model, system, user):
         with lock:
-            captured.append(system)
-        return {"dst": f"dst:{user}"}
+            captured_systems.append(system)
+            captured_users.append(user)
+        # Source text is embedded in a JSON instruction prompt.
+        src = user.rsplit("\n", 1)[-1].strip()
+        return {"dst": f"dst:{src}"}
 
     monkeypatch.setattr(openai_translate, "_call_json", fake_call_json)
     monkeypatch.setattr(openai_translate, "_client", lambda *a, **kw: object())
@@ -208,7 +212,8 @@ def test_translate_batch_uses_shared_system_prompt(monkeypatch):
         base_url="u", api_key="k", model="m", concurrency=4,
     )
     assert out == [f"dst:s{i}" for i in range(5)]
-    assert len(set(captured)) == 1, "system prompt must be identical across calls for prompt cache"
+    assert all("json" in user.lower() for user in captured_users)
+    assert len(set(captured_systems)) == 1, "system prompt must be identical across calls for prompt cache"
 
 
 @pytest.mark.parametrize("value", ["abc", "1.5", "0", "-1", "201", ""])
@@ -239,6 +244,89 @@ def test_extract_json_recovers_common_model_outputs(raw, expected):
 def test_extract_json_rejects_unrecoverable_payload():
     with pytest.raises(json.JSONDecodeError, match="no JSON object found"):
         openai_translate._extract_json("not json at all")
+
+
+def test_extract_json_rejects_empty_payload():
+    with pytest.raises(json.JSONDecodeError, match="empty model content"):
+        openai_translate._extract_json("   ")
+
+
+def test_coerce_translation_payload_accepts_aliases():
+    assert openai_translate._coerce_translation_payload({"translation": "你好"}) == {"dst": "你好"}
+    assert openai_translate._coerce_translation_payload({"data": {"text": "世界"}}) == {"dst": "世界"}
+    assert openai_translate._coerce_translation_payload({}) == {}
+
+
+def test_message_text_falls_back_to_reasoning_content():
+    class Msg:
+        content = ""
+        reasoning_content = '{"dst":"来自推理"}'
+
+    class Choice:
+        message = Msg()
+
+    class Resp:
+        choices = [Choice()]
+
+    assert openai_translate._message_text(Resp()) == '{"dst":"来自推理"}'
+
+
+def test_message_text_skips_empty_json_content_for_reasoning():
+    class Msg:
+        content = "{}"
+        reasoning_content = '{"dst":"来自推理"}'
+
+    class Choice:
+        message = Msg()
+
+    class Resp:
+        choices = [Choice()]
+
+    assert openai_translate._message_text(Resp()) == '{"dst":"来自推理"}'
+
+
+def test_call_json_disables_thinking_and_skips_empty_object(monkeypatch):
+    calls: list[dict] = []
+
+    class Msg:
+        content = "{}"
+        reasoning_content = '{"dst":"推理译文"}'
+
+    class Choice:
+        message = Msg()
+
+    class Resp:
+        choices = [Choice()]
+
+    class FakeClient:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kwargs):
+                    calls.append(kwargs)
+                    return Resp()
+
+    data = openai_translate._call_json(FakeClient(), "deepseek-v4-flash", "sys", "user")
+    assert data == {"dst": "推理译文"}
+    assert calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert calls[0]["response_format"] == {"type": "json_object"}
+
+
+def test_translate_sentence_recovers_from_empty_then_alias(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_call_json(client, model, system, user):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {}
+        return {"translation": "修好了"}
+
+    monkeypatch.setattr(openai_translate, "_call_json", fake_call_json)
+    monkeypatch.setattr(openai_translate.time, "sleep", lambda *_: None)
+
+    out = openai_translate.translate_sentence("fix it", "zh", object(), "m", "sys")
+    assert out == "修好了"
+    assert calls["n"] == 2
 
 
 def test_translate_sentence_retries_on_timeout(monkeypatch):
@@ -285,9 +373,28 @@ def test_translate_sentence_raises_after_retries(monkeypatch):
         raise ValueError("boom")
 
     monkeypatch.setattr(openai_translate, "_call_json", fake_call_json)
+    monkeypatch.setattr(
+        openai_translate,
+        "_translate_plain",
+        lambda *a, **kw: (_ for _ in ()).throw(ValueError("plain also failed")),
+    )
+    monkeypatch.setattr(openai_translate.time, "sleep", lambda *_: None)
 
     with pytest.raises(RuntimeError, match="translate_sentence failed"):
         openai_translate.translate_sentence("x", "en", object(), "m", "sys")
+
+
+def test_translate_sentence_plain_fallback(monkeypatch):
+    monkeypatch.setattr(
+        openai_translate,
+        "_call_json",
+        lambda *a, **kw: (_ for _ in ()).throw(ValueError("empty json object")),
+    )
+    monkeypatch.setattr(openai_translate, "_translate_plain", lambda *a, **kw: "纯文本译文")
+    monkeypatch.setattr(openai_translate.time, "sleep", lambda *_: None)
+
+    out = openai_translate.translate_sentence("hello", "zh", object(), "m", "sys")
+    assert out == "纯文本译文"
 
 
 def test_preprocess_returns_empty_when_repeatedly_invalid(monkeypatch):

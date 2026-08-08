@@ -75,10 +75,25 @@ def _client(base_url: str, api_key: str) -> OpenAI:
 
 _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 _DST_STRING_RE = re.compile(r'"dst"\s*:\s*("(?:\\.|[^"\\])*")', re.DOTALL)
+_DST_ALT_KEYS = (
+    "dst",
+    "translation",
+    "translated",
+    "text",
+    "result",
+    "output",
+    "target",
+    "zh",
+    "en",
+)
 
 
 def _strip_json_fences(raw: str) -> str:
     text = raw.strip()
+    if "```" in text:
+        fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
+        if fenced:
+            return fenced.group(1).strip()
     if not text.startswith("```"):
         return text
     text = re.sub(r"^```(?:json)?\s*", "", text, count=1, flags=re.IGNORECASE)
@@ -86,8 +101,89 @@ def _strip_json_fences(raw: str) -> str:
     return text.strip()
 
 
+def _normalize_message_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+                continue
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if text:
+                    parts.append(str(text).strip())
+                continue
+            text = getattr(item, "text", None)
+            if text:
+                parts.append(str(text).strip())
+        return "\n".join(part for part in parts if part).strip()
+    return ""
+
+
+def _is_empty_json_object_text(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    try:
+        data = json.loads(_strip_json_fences(stripped))
+    except Exception:
+        return False
+    return isinstance(data, dict) and not data
+
+
+def _message_text_candidates(response: Any) -> list[str]:
+    """Prefer final content; fall back to reasoning when content is empty/useless."""
+    try:
+        message = response.choices[0].message
+    except (IndexError, AttributeError, TypeError):
+        return []
+
+    content = _normalize_message_text(getattr(message, "content", None))
+    reasoning_parts: list[str] = []
+    for attr in ("reasoning_content", "reasoning"):
+        value = _normalize_message_text(getattr(message, attr, None))
+        if value and value not in reasoning_parts:
+            reasoning_parts.append(value)
+
+    # deepseek JSON mode often returns "{}" in content while the real answer
+    # is only in reasoning_content — prefer the useful text first.
+    candidates: list[str] = []
+    if content and not _is_empty_json_object_text(content):
+        candidates.append(content)
+    for value in reasoning_parts:
+        if value not in candidates:
+            candidates.append(value)
+    if content and content not in candidates:
+        candidates.append(content)
+    return candidates
+
+def _message_text(response: Any) -> str:
+    candidates = _message_text_candidates(response)
+    return candidates[0] if candidates else ""
+
+
+def _coerce_translation_payload(data: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(data.get("dst"), str) and data["dst"].strip():
+        return {"dst": data["dst"]}
+    for key in _DST_ALT_KEYS:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return {"dst": value.strip()}
+    nested = data.get("data") or data.get("result")
+    if isinstance(nested, dict):
+        return _coerce_translation_payload(nested)
+    if isinstance(nested, str) and nested.strip():
+        return {"dst": nested.strip()}
+    return data
+
+
 def _extract_json(raw: str) -> dict[str, Any]:
-    text = _strip_json_fences(raw)
+    text = _strip_json_fences(raw or "")
+    if not text.strip():
+        raise json.JSONDecodeError("empty model content", raw or "", 0)
+
     candidates: list[str] = [text]
     match = _JSON_BLOCK_RE.search(text)
     if match:
@@ -109,6 +205,8 @@ def _extract_json(raw: str) -> dict[str, Any]:
             continue
         if isinstance(data, dict):
             return data
+        if isinstance(data, str) and data.strip():
+            return {"dst": data.strip()}
 
     dst_match = _DST_STRING_RE.search(text)
     if dst_match:
@@ -128,17 +226,56 @@ def _extract_json(raw: str) -> dict[str, Any]:
 
 
 def _call_json(client: OpenAI, model: str, system: str, user: str) -> dict[str, Any]:
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
+    # deepseek-v4 enables thinking by default; with JSON mode it often returns
+    # empty content or "{}". Disable thinking for structured translation calls.
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=0.2,
-        timeout=REQUEST_TIMEOUT_SECONDS,
-    )
-    raw = response.choices[0].message.content or "{}"
-    return _extract_json(raw)
+        "temperature": 0.2,
+        "timeout": REQUEST_TIMEOUT_SECONDS,
+        "max_tokens": 1024,
+        "extra_body": {"thinking": {"type": "disabled"}},
+    }
+    try:
+        response = client.chat.completions.create(
+            **kwargs,
+            response_format={"type": "json_object"},
+        )
+    except Exception as format_exc:
+        log.debug("json_object/thinking options rejected, retrying plain: %s", format_exc)
+        plain_kwargs = dict(kwargs)
+        plain_kwargs.pop("extra_body", None)
+        try:
+            response = client.chat.completions.create(
+                **plain_kwargs,
+                response_format={"type": "json_object"},
+            )
+        except Exception:
+            response = client.chat.completions.create(**plain_kwargs)
+
+    texts = _message_text_candidates(response)
+    if not texts:
+        raise ValueError("model returned empty content")
+
+    last_error: Exception | None = None
+    for raw in texts:
+        try:
+            data = _extract_json(raw)
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            continue
+        # DeepSeek JSON mode may return "{}" when the prompt is under-specified.
+        if isinstance(data, dict) and data == {}:
+            last_error = ValueError("model returned empty json object")
+            continue
+        return data
+
+    if last_error is not None:
+        raise last_error
+    raise ValueError("model returned empty json object")
 
 
 def _format_terms(items: list, fmt: str, empty: str) -> str:
@@ -217,6 +354,53 @@ def _post_process(text: str, target_language: str) -> str:
     return cleaned
 
 
+def _translate_plain(
+    text: str,
+    target_language: str,
+    client: OpenAI,
+    model: str,
+    system: str,
+) -> str:
+    """Last-resort plain-text translation when JSON mode keeps returning {}."""
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    f"{system}\n\n"
+                    "If JSON fails, reply with the translation text only. "
+                    "No JSON, no quotes, no explanation."
+                ),
+            },
+            {"role": "user", "content": f"Translate to natural prose:\n{text}"},
+        ],
+        "temperature": 0.2,
+        "timeout": REQUEST_TIMEOUT_SECONDS,
+        "max_tokens": 1024,
+        "extra_body": {"thinking": {"type": "disabled"}},
+    }
+    try:
+        response = client.chat.completions.create(**kwargs)
+    except Exception:
+        kwargs.pop("extra_body", None)
+        response = client.chat.completions.create(**kwargs)
+    raw = _message_text(response)
+    if not raw:
+        raise ValueError("model returned empty plain translation")
+    # Accidental JSON wrapper still OK.
+    try:
+        data = _coerce_translation_payload(_extract_json(raw))
+        if isinstance(data.get("dst"), str) and data["dst"].strip():
+            return _post_process(data["dst"], target_language)
+    except Exception:
+        pass
+    cleaned = raw.strip().strip('"').strip("'")
+    if not cleaned or _is_empty_json_object_text(cleaned):
+        raise ValueError("empty plain translation")
+    return _post_process(cleaned, target_language)
+
+
 def translate_sentence(
     text: str,
     target_language: str,
@@ -227,7 +411,22 @@ def translate_sentence(
     last_error: Exception | None = None
     for attempt in range(TRANSLATE_RETRY):
         try:
-            data = _call_json(client, model, system, text)
+            if attempt == 0:
+                user = (
+                    "Translate the following sentence.\n"
+                    'Return ONLY a JSON object with key dst.\n'
+                    'Example: {"dst":"翻译结果"}\n\n'
+                    f"{text}"
+                )
+            else:
+                user = (
+                    "Your previous reply was empty or invalid. "
+                    "Return ONLY one JSON object with key dst. "
+                    'Example: {"dst":"翻译结果"}\n'
+                    "Do not leave dst empty.\n\n"
+                    f"Source text:\n{text}"
+                )
+            data = _coerce_translation_payload(_call_json(client, model, system, user))
             item = TranslationItem.model_validate(data)
             if not item.dst.strip():
                 raise ValueError("empty dst")
@@ -238,7 +437,13 @@ def translate_sentence(
                 break
             log.warning("translate attempt %d failed for %r: %s", attempt + 1, text[:60], exc)
             time.sleep(min(2**attempt, 8))
-    raise RuntimeError(f"translate_sentence failed after {TRANSLATE_RETRY} attempts: {last_error}")
+    try:
+        return _translate_plain(text, target_language, client, model, system)
+    except Exception as plain_exc:
+        raise RuntimeError(
+            f"translate_sentence failed after {TRANSLATE_RETRY} attempts: {last_error}; "
+            f"plain fallback: {plain_exc}"
+        ) from plain_exc
 
 
 def translate_batch(
