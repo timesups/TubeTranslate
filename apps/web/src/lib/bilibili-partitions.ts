@@ -4,8 +4,8 @@ export type BilibiliPartitionOption = {
   group: string
 }
 
-/** Default: 知识区 / 科学科普 */
-export const DEFAULT_BILIBILI_TID = 201
+/** Default: 知识区 / 设计·创意 */
+export const DEFAULT_BILIBILI_TID = 229
 
 export const BILIBILI_PARTITIONS: BilibiliPartitionOption[] = [
   { tid: 201, name: "科学科普", group: "知识" },

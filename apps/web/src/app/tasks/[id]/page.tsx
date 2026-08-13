@@ -281,12 +281,18 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                       : t.task.ttsVoxcpm}
                 </dd>
                 <dt className="text-muted-foreground">{t.task.bilibiliTid}</dt>
-                <dd>{bilibiliPartitionLabel(task.bilibili_tid ?? 201)}</dd>
+                <dd>{bilibiliPartitionLabel(task.bilibili_tid ?? 229)}</dd>
                 <dt className="text-muted-foreground">{t.task.bilibiliAutoPublish}</dt>
                 <dd>
                   {task.bilibili_auto_publish === false
                     ? t.task.bilibiliAutoPublishNo
                     : t.task.bilibiliAutoPublishYes}
+                </dd>
+                <dt className="text-muted-foreground">{t.task.bilibiliGenerateMeta}</dt>
+                <dd>
+                  {task.bilibili_generate_meta === false
+                    ? t.task.bilibiliGenerateMetaNo
+                    : t.task.bilibiliGenerateMetaYes}
                 </dd>
                 {task.session_path ? (
                   <>

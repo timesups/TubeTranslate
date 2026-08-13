@@ -22,7 +22,7 @@ def test_bilibili_partitions_and_settings(monkeypatch, tmp_path):
     saved = client.post(
         "/api/bilibili/settings",
         json={
-            "default_tid": 201,
+            "default_tid": 229,
             "default_tag": "配音",
             "default_copyright": 1,
             "video_dir": str(tmp_path / "staging"),

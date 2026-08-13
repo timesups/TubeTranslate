@@ -129,7 +129,7 @@ def test_merge_english_utterances_absorbs_filler():
 def test_merge_english_utterances_respects_gap_limit():
     utts = [
         _utt("All of this will be", 0, 500),
-        _utt("completely available.", 1300, 1800),  # gap 800 > 600
+        _utt("completely available.", 1400, 1900),  # gap 900 > 800
     ]
     merged = asr_sentence_fixer.merge_english_utterances(utts)
     assert len(merged) == 2
@@ -138,10 +138,26 @@ def test_merge_english_utterances_respects_gap_limit():
 def test_merge_english_utterances_allows_small_pause():
     utts = [
         _utt("All of this will be", 0, 500),
-        _utt("completely available.", 1040, 1600),  # gap 540 <= 600
+        _utt("completely available.", 1200, 1800),  # gap 700 <= 800
     ]
     merged = asr_sentence_fixer.merge_english_utterances(utts)
     assert [u["text"] for u in merged] == ["All of this will be completely available."]
+
+
+def test_merge_english_utterances_absorbs_soft_period_fragments():
+    utts = [
+        _utt("And.", 0, 200),
+        _utt("also.", 220, 400),
+        _utt("we extrude this face.", 420, 1200),
+        _utt("Like so.", 1220, 1500),
+        _utt("Apply.", 1520, 1800),
+        _utt("Next we add the bevel.", 2000, 2800),
+    ]
+    merged = asr_sentence_fixer.merge_english_utterances(utts)
+    assert [u["text"] for u in merged] == [
+        "And. also. we extrude this face. Like so. Apply.",
+        "Next we add the bevel.",
+    ]
 
 
 def test_fix_asr_sentences_merges_english(tmp_path):

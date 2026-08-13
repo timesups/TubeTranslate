@@ -7,9 +7,9 @@ from typing import Any
 
 
 # Merge short English ASR fragments into readable sentence units before translate/TTS.
-MAX_MERGE_GAP_MS = 600
-MAX_MERGED_DURATION_MS = 10_000
-MAX_MERGED_WORDS = 50
+MAX_MERGE_GAP_MS = 800
+MAX_MERGED_DURATION_MS = 12_000
+MAX_MERGED_WORDS = 60
 SHORT_FRAGMENT_WORDS = 4
 
 _TERMINAL_RE = re.compile(r"""[.!?…](?:["'`”’)\]]+)?\s*$""")
@@ -164,6 +164,16 @@ _TRAILING_FILLERS = frozenset(
         "ok?",
         "yeah?",
         "yep?",
+        "like so",
+        "like so.",
+        "like this",
+        "like this.",
+        "like that",
+        "like that.",
+        "all right",
+        "all right.",
+        "alright",
+        "alright.",
     }
 )
 
@@ -175,8 +185,10 @@ _LEADING_FILLERS = frozenset(
         "again.",
         "so",
         "so,",
+        "so.",
         "well",
         "well,",
+        "well.",
         "i mean",
         "i mean,",
         "okay",
@@ -204,6 +216,90 @@ _LEADING_FILLERS = frozenset(
         "basically",
         "basically,",
         "you know,",
+        "and",
+        "and.",
+        "also",
+        "also.",
+        "but",
+        "but.",
+        "or",
+        "or.",
+        "then",
+        "then.",
+        "now",
+        "now.",
+        "and also",
+        "and also.",
+        "and then",
+        "and then.",
+    }
+)
+
+# Tutorial ASR often emits these as fake "complete sentences" with a period.
+_SOFT_FRAGMENT_CORES = frozenset(
+    {
+        "and",
+        "also",
+        "so",
+        "but",
+        "or",
+        "then",
+        "now",
+        "again",
+        "well",
+        "here",
+        "there",
+        "like",
+        "like so",
+        "like this",
+        "like that",
+        "this",
+        "that",
+        "the",
+        "a",
+        "an",
+        "to",
+        "of",
+        "for",
+        "with",
+        "from",
+        "into",
+        "down",
+        "up",
+        "off",
+        "on",
+        "in",
+        "out",
+        "over",
+        "under",
+        "one",
+        "two",
+        "three",
+        "four",
+        "okay",
+        "ok",
+        "right",
+        "yeah",
+        "yep",
+        "all right",
+        "alright",
+        "and also",
+        "and then",
+        "i mean",
+        # One-word tutorial commands often get a fake period from ASR.
+        "apply",
+        "select",
+        "press",
+        "click",
+        "done",
+        "delete",
+        "duplicate",
+        "extrude",
+        "bevel",
+        "depth",
+        "scale",
+        "rotate",
+        "move",
     }
 )
 
@@ -293,18 +389,26 @@ def _normalize_filler(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip()).lower()
 
 
+def _core_text(text: str) -> str:
+    cleaned = re.sub(r"[.!?,:;]+", " ", _normalize_filler(text))
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _is_trailing_filler(text: str) -> bool:
     cleaned = _normalize_filler(text)
     if cleaned in _TRAILING_FILLERS:
         return True
-    return _word_count(cleaned) <= 2 and cleaned.rstrip(".?!,") in {"right", "okay", "ok", "yeah", "yep"}
+    core = _core_text(text)
+    if core in {"right", "okay", "ok", "yeah", "yep", "like so", "like this", "like that", "all right", "alright"}:
+        return True
+    return False
 
 
 def _is_leading_filler(text: str) -> bool:
     cleaned = _normalize_filler(text)
     if cleaned in _LEADING_FILLERS:
         return True
-    return _word_count(cleaned) <= 2 and cleaned.rstrip(".?!,") in {
+    return _core_text(text) in {
         "again",
         "so",
         "well",
@@ -316,7 +420,29 @@ def _is_leading_filler(text: str) -> bool:
         "um",
         "ah",
         "oh",
+        "and",
+        "also",
+        "but",
+        "or",
+        "then",
+        "now",
+        "and also",
+        "and then",
+        "i mean",
     }
+
+
+def _is_soft_fragment(text: str) -> bool:
+    """Short ASR chunks that only look finished because of a trailing period."""
+    words = _word_count(text)
+    if words == 0 or words > 3:
+        return False
+    core = _core_text(text)
+    if core in _SOFT_FRAGMENT_CORES:
+        return True
+    if _is_leading_filler(text) or _is_trailing_filler(text):
+        return True
+    return False
 
 
 def _leading_word(text: str) -> str:
@@ -387,15 +513,30 @@ def _should_merge(left: dict[str, Any], right: dict[str, Any]) -> bool:
     left_text = str(left["text"])
     right_text = str(right["text"])
 
-    # ".... topology." + "right?" → keep the tag with the previous sentence.
+    # ".... topology." + "right?" / "Like so." / "Apply." → keep with previous clause.
+    # Do not absorb leading openers ("Again," / "And.") backwards.
     if _is_trailing_filler(right_text):
         return True
+    if _is_soft_fragment(right_text) and not _is_leading_filler(right_text):
+        return True
 
-    # "Again," + "you'll see examples." → attach opener to the following clause.
+    # "Again," / "And." / "Also." → attach opener to the following clause.
     if _is_leading_filler(left_text):
         return True
 
-    # Completed sentence: keep the boundary.
+    # Soft left crumbs (e.g. "Apply.") only glue forward onto more crumbs/continuations,
+    # never onto a fresh capitalized sentence.
+    if _is_soft_fragment(left_text):
+        if (
+            _looks_like_continuation(right_text)
+            or _is_soft_fragment(right_text)
+            or _is_leading_filler(right_text)
+            or _word_count(right_text) <= SHORT_FRAGMENT_WORDS
+        ):
+            return True
+        return False
+
+    # Real completed sentence: keep the boundary.
     if _has_strong_terminal(left_text):
         return False
 
@@ -403,7 +544,7 @@ def _should_merge(left: dict[str, Any], right: dict[str, Any]) -> bool:
     if _looks_like_continuation(right_text):
         return True
 
-    # Ultra-short fragments without terminal punctuation are usually choppy ASR.
+    # Ultra-short fragments without a hard terminal are usually choppy ASR.
     if _word_count(left_text) <= SHORT_FRAGMENT_WORDS:
         return True
 

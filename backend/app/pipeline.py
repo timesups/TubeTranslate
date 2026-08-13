@@ -164,6 +164,16 @@ class PipelineRunner:
         except ValueError:
             return database.DEFAULT_BILIBILI_AUTO_PUBLISH
 
+    def _generate_bilibili_meta(self, task: dict | None = None) -> bool:
+        current = task or database.get_task(self.task_id) or {}
+        try:
+            return database.resolve_bilibili_generate_meta(
+                current.get("bilibili_generate_meta"),
+                bilibili_auto_publish=current.get("bilibili_auto_publish"),
+            )
+        except ValueError:
+            return database.DEFAULT_BILIBILI_GENERATE_META
+
     def _export_final_video(self, final_video: Path, *, bilibili_meta: Path | None = None) -> None:
         """Export only when auto Bilibili publish is disabled."""
         from .adapters.export_video import export_final_video
@@ -357,17 +367,23 @@ class PipelineRunner:
             return
         if stage == "bilibili_meta":
             self.artifacts.final_video = _require_existing(session / "media" / "video_final.mp4", "final_video")
-            self.artifacts.bilibili_meta = _require_existing(
-                session / "metadata" / "bilibili_meta.json",
-                "bilibili_meta",
-            )
+            meta_path = session / "metadata" / "bilibili_meta.json"
+            if meta_path.exists():
+                self.artifacts.bilibili_meta = meta_path
+            elif self._generate_bilibili_meta(task):
+                self.artifacts.bilibili_meta = _require_existing(meta_path, "bilibili_meta")
+            else:
+                self.artifacts.bilibili_meta = None
             return
         if stage == "bilibili_publish":
             self.artifacts.final_video = _require_existing(session / "media" / "video_final.mp4", "final_video")
-            self.artifacts.bilibili_meta = _require_existing(
-                session / "metadata" / "bilibili_meta.json",
-                "bilibili_meta",
-            )
+            meta_path = session / "metadata" / "bilibili_meta.json"
+            if meta_path.exists():
+                self.artifacts.bilibili_meta = meta_path
+            elif self._auto_publish_bilibili(task):
+                self.artifacts.bilibili_meta = _require_existing(meta_path, "bilibili_meta")
+            else:
+                self.artifacts.bilibili_meta = None
             publish_path = session / "metadata" / "bilibili_publish.json"
             self.artifacts.bilibili_publish = publish_path if publish_path.exists() else None
             return
@@ -655,6 +671,14 @@ class PipelineRunner:
         from .bilibili.deepseek_meta import generate_bilibili_meta, load_settings
         from .bilibili.media_scan import read_srt
 
+        if not self._generate_bilibili_meta(task):
+            self.artifacts.bilibili_meta = None
+            self.stage_message(
+                "bilibili_meta",
+                "Skipped (description generation disabled; Bilibili auto-publish is off)",
+            )
+            return
+
         session = _require(self.artifacts.session, "session")
         final_video = self.artifacts.final_video
         if final_video is None and task.get("final_video_path"):
@@ -690,7 +714,7 @@ class PipelineRunner:
             "tid": int(
                 task.get("bilibili_tid")
                 or settings.get("default_tid")
-                or 201
+                or database.DEFAULT_BILIBILI_TID
             ),
             "copyright": int(settings.get("default_copyright") or 1),
             "source": "",
@@ -739,7 +763,7 @@ class PipelineRunner:
 
         upload_meta = UploadMeta(
             title=str(payload.get("title") or "").strip(),
-            tid=int(payload.get("tid") or 201),
+            tid=int(payload.get("tid") or database.DEFAULT_BILIBILI_TID),
             tag=str(payload.get("tag") or "配音"),
             desc=str(payload.get("desc") or "").strip(),
             copyright=int(payload.get("copyright") or 1),

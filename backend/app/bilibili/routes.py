@@ -18,7 +18,7 @@ from .deepseek_meta import (
     settings_public,
 )
 from .media_scan import read_srt, scan_video_folder
-from .partitions import PARTITIONS
+from .partitions import DEFAULT_BILIBILI_TID, PARTITIONS
 from .staging import prepare_task_staging, staging_dir
 from .uploader import UploadMeta, create_job, jobs, run_upload_job
 
@@ -231,7 +231,7 @@ async def generate(body: GenerateBody) -> dict[str, Any]:
         "desc": meta["desc"],
         "tag": meta["tag_str"],
         "dynamic": meta["dynamic"],
-        "tid": int(settings.get("default_tid") or 201),
+        "tid": int(settings.get("default_tid") or DEFAULT_BILIBILI_TID),
         "copyright": int(settings.get("default_copyright") or 1),
     }
 
@@ -272,7 +272,7 @@ async def publish(body: PublishBody, background_tasks: BackgroundTasks) -> dict[
         job = create_job()
         meta = UploadMeta(
             title=title,
-            tid=int(item.tid if item.tid is not None else settings.get("default_tid") or 201),
+            tid=int(item.tid if item.tid is not None else settings.get("default_tid") or DEFAULT_BILIBILI_TID),
             tag=item.tag.strip() or str(settings.get("default_tag") or "配音"),
             desc=item.desc.strip(),
             copyright=copyright_val,

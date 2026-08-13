@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -15,18 +17,46 @@ from ..sanitize import sanitize_text
 from ..sources import SourceConfig
 from ..youtube import extract_video_id, validate_video_url
 
+log = logging.getLogger(__name__)
+
 
 FORMAT_CANDIDATES = (
-    "bestvideo[height<=1080]+bestaudio/best",
-    "bestvideo+bestaudio/best",
+    # Prefer muxed/progressive fallbacks: ios/tv clients often lack separate A/V streams.
+    "best[height<=1080][ext=mp4]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best",
+    "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+    "bestvideo*+bestaudio/best",
     "bv*+ba/b",
     "best",
 )
 
-DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+# Prefer clients that still return downloadable URLs; end with yt-dlp defaults.
+YOUTUBE_PLAYER_CLIENTS = (
+    ("ios", "tv", "android_vr"),
+    ("tv_embedded", "mweb", "web_safari"),
+    ("web",),
+    (),  # empty => do not force player_client; use yt-dlp defaults
 )
+
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+YOUTUBE_403_HINT = (
+    "YouTube returned HTTP 403 while downloading video data. "
+    "Upload a YouTube cookie in Settings, then retry this task from the download stage."
+)
+YOUTUBE_FORMAT_HINT = (
+    "YouTube did not expose a matching downloadable format for the selected clients. "
+    "Upload a YouTube cookie in Settings (or update yt-dlp), then retry from the download stage."
+)
+
+
+def _decorate_download_error(exc: Exception) -> Exception:
+    if _is_http_forbidden(exc):
+        return RuntimeError(f"{YOUTUBE_403_HINT} Original error: {exc}")
+    if _is_format_unavailable(exc):
+        return RuntimeError(f"{YOUTUBE_FORMAT_HINT} Original error: {exc}")
+    return exc
 
 
 def _bootstrap_bilibili_cookie(cookie_path: Path) -> None:
@@ -67,13 +97,21 @@ def _ydl_base(source: SourceConfig, proxy_port: str = "") -> dict[str, Any]:
         "quiet": True,
         "no_warnings": True,
         "js_runtimes": {"node": {}},
-        "http_headers": {"User-Agent": DEFAULT_USER_AGENT},
+        "http_headers": {
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.youtube.com/",
+        },
     }
     cookie_path = source.cookie_path
     if cookie_path:
         metadata = runtime_security.private_file_stat(cookie_path)
         if metadata and metadata.st_size > 0:
             opts["cookiefile"] = str(cookie_path)
+    if source.name == "youtube":
+        opts["extractor_args"] = {
+            "youtube": {"player_client": list(YOUTUBE_PLAYER_CLIENTS[0])},
+        }
     if not source.use_proxy:
         opts["proxy"] = ""
         return opts
@@ -91,13 +129,25 @@ def _session_path(workfolder: Path, info: dict[str, Any]) -> Path:
 
 
 def _is_format_unavailable(exc: Exception) -> bool:
-    return "Requested format is not available" in str(exc)
+    text = re.sub(r"\x1b\[[0-9;]*m", "", str(exc))
+    return "Requested format is not available" in text
+
+
+def _is_http_forbidden(exc: Exception) -> bool:
+    text = re.sub(r"\x1b\[[0-9;]*m", "", str(exc)).lower()
+    return "http error 403" in text or "403: forbidden" in text
+
+
+def _is_retryable_download_error(exc: Exception) -> bool:
+    if _is_format_unavailable(exc) or _is_http_forbidden(exc):
+        return True
+    text = re.sub(r"\x1b\[[0-9;]*m", "", str(exc)).lower()
+    return "unable to download video data" in text or "no video formats" in text
 
 
 def _remove_partial_outputs(video_file: Path) -> None:
+    """Delete the target mp4 and any yt-dlp sidecar/partial next to it."""
     for candidate in video_file.parent.glob(f"{video_file.name}*"):
-        if candidate == video_file:
-            continue
         if candidate.is_file():
             candidate.unlink(missing_ok=True)
 
@@ -189,11 +239,31 @@ def download_original_cover(
     return dest if dest.exists() and dest.stat().st_size > 0 else None
 
 
+def _download_attempts(source: SourceConfig) -> list[tuple[str, dict[str, Any] | None]]:
+    if source.name != "youtube":
+        return [(selector, None) for selector in FORMAT_CANDIDATES]
+    attempts: list[tuple[str, dict[str, Any] | None]] = []
+    for clients in YOUTUBE_PLAYER_CLIENTS:
+        if clients:
+            extractor_args: dict[str, Any] | None = {
+                "youtube": {"player_client": list(clients)}
+            }
+        else:
+            extractor_args = None
+        for selector in FORMAT_CANDIDATES:
+            attempts.append((selector, extractor_args))
+    return attempts
+
+
 def _download_with_format_candidates(
     url: str, video_file: Path, source: SourceConfig, proxy_port: str
 ) -> None:
     last_error: Exception | None = None
-    for format_selector in FORMAT_CANDIDATES:
+    skip_client_key: tuple[str, ...] | None = None
+    for format_selector, extractor_args in _download_attempts(source):
+        client_key = tuple((extractor_args or {}).get("youtube", {}).get("player_client") or ())
+        if skip_client_key is not None and client_key == skip_client_key:
+            continue
         download_opts = {
             **_ydl_base(source, proxy_port),
             "format": format_selector,
@@ -201,18 +271,46 @@ def _download_with_format_candidates(
             "outtmpl": str(video_file),
             "retries": 10,
             "fragment_retries": 10,
+            "overwrites": True,
+            "continuedl": False,
+            # Avoid pre-checking every format URL; some clients falsely mark streams dead.
+            "check_formats": False,
         }
+        if extractor_args is not None:
+            download_opts["extractor_args"] = extractor_args
+        elif "extractor_args" in download_opts:
+            # Empty client tuple = use yt-dlp defaults instead of the base override.
+            download_opts.pop("extractor_args", None)
         try:
             with yt_dlp.YoutubeDL(download_opts) as ydl:
                 ydl.download([url])
-            return
+            if video_file.exists() and video_file.stat().st_size > 0:
+                return
+            last_error = RuntimeError("yt-dlp finished without producing media/video_source.mp4")
+            _remove_partial_outputs(video_file)
         except Exception as exc:
             last_error = exc
             _remove_partial_outputs(video_file)
-            if not _is_format_unavailable(exc):
+            clients = ",".join(client_key) if client_key else "default"
+            log.warning(
+                "yt-dlp candidate failed clients=%s format=%s: %s",
+                clients,
+                format_selector,
+                exc,
+            )
+            if _is_http_forbidden(exc) and client_key:
+                skip_client_key = client_key
                 continue
+            if _is_format_unavailable(exc) and client_key and format_selector == FORMAT_CANDIDATES[-1]:
+                # Last format for this client still missing → jump to next client group.
+                skip_client_key = client_key
+                continue
+            skip_client_key = None
+            if _is_retryable_download_error(exc):
+                continue
+            raise _decorate_download_error(exc) from exc
     if last_error:
-        raise last_error
+        raise _decorate_download_error(last_error) from last_error
 
 
 def download_video(
@@ -246,9 +344,9 @@ def download_video(
         # Keep going; staging can fall back to a frame grab later.
         pass
 
-    if video_file.exists() and video_file.stat().st_size > 0:
-        return session, info
-
+    # Never reuse a leftover mp4 from a previous failed download: pipeline only
+    # reaches here when the download stage is not succeeded.
+    _remove_partial_outputs(video_file)
     _download_with_format_candidates(canonical_url, video_file, source, proxy_port)
 
     if not video_file.exists() or video_file.stat().st_size == 0:

@@ -17,7 +17,7 @@ def configure_db(monkeypatch, tmp_path):
 
 
 def test_normalize_tts_provider_defaults_and_rejects_invalid():
-    assert database.normalize_tts_provider(None) == "voxcpm"
+    assert database.normalize_tts_provider(None) == "azure"
     assert database.normalize_tts_provider("volcengine") == "volcengine"
     assert database.normalize_tts_provider("azure") == "azure"
     with pytest.raises(ValueError, match="tts_provider must be one of"):

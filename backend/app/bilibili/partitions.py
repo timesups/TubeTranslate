@@ -1,7 +1,7 @@
 """常用投稿分区（tid）。"""
 
-# 知识区默认叶子分区：科学科普
-DEFAULT_BILIBILI_TID = 201
+# 知识区默认叶子分区：设计·创意
+DEFAULT_BILIBILI_TID = 229
 
 PARTITIONS = [
     # 知识

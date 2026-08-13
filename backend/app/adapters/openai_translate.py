@@ -25,6 +25,53 @@ DESCRIPTION_LIMIT = 500
 DEFAULT_CONCURRENCY = 8
 MAX_EFFECTIVE_CONCURRENCY = 16
 REQUEST_TIMEOUT_SECONDS = 60.0
+SHORT_SRC_WORDS = 3
+_SRC_WORD_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?")
+
+# Deterministic compact gloss for tutorial ASR crumbs that models love to expand.
+_SHORT_GLOSSARY_ZH = {
+    "and": "然后",
+    "also": "另外",
+    "so": "这样",
+    "but": "但是",
+    "or": "或者",
+    "then": "然后",
+    "now": "现在",
+    "again": "再次",
+    "well": "嗯",
+    "here": "这里",
+    "there": "那里",
+    "like": "就像",
+    "like so": "像这样",
+    "like this": "像这样",
+    "like that": "像那样",
+    "this": "这个",
+    "that": "那个",
+    "okay": "好",
+    "ok": "好",
+    "right": "对",
+    "yeah": "嗯",
+    "yep": "嗯",
+    "all right": "好",
+    "alright": "好",
+    "and also": "另外",
+    "and then": "然后",
+    "i mean": "我是说",
+    "apply": "应用",
+    "select": "选择",
+    "press": "按",
+    "click": "点击",
+    "done": "完成",
+    "next": "接下来",
+    "depth": "深度",
+    "scale": "缩放",
+    "rotate": "旋转",
+    "move": "移动",
+    "delete": "删除",
+    "duplicate": "复制",
+    "extrude": "挤出",
+    "bevel": "倒角",
+}
 
 
 class HotwordItem(BaseModel):
@@ -354,6 +401,66 @@ def _post_process(text: str, target_language: str) -> str:
     return cleaned
 
 
+def _src_words(text: str) -> list[str]:
+    return [match.group(0).lower().replace("’", "'") for match in _SRC_WORD_RE.finditer(text or "")]
+
+
+def _short_glossary_dst(text: str, target_language: str) -> str | None:
+    if target_language != "zh":
+        return None
+    words = _src_words(text)
+    if not words or len(words) > SHORT_SRC_WORDS:
+        return None
+    return _SHORT_GLOSSARY_ZH.get(" ".join(words))
+
+
+def _max_dst_units(src: str, target_language: str) -> int | None:
+    """Soft length budget for short source crumbs (CJK chars / English words)."""
+    words = _src_words(src)
+    count = len(words)
+    if count == 0 or count > SHORT_SRC_WORDS:
+        return None
+    if target_language == "zh":
+        return 4 + count * 4  # 1 word → 8, 2 → 12, 3 → 16
+    return 4 + count * 4
+
+
+def _dst_units(dst: str, target_language: str) -> int:
+    if target_language == "zh":
+        return sum(1 for ch in dst if ("\u4e00" <= ch <= "\u9fff") or ch.isalnum())
+    return len([part for part in re.split(r"\s+", dst.strip()) if part])
+
+
+def _is_overlong_translation(src: str, dst: str, target_language: str) -> bool:
+    budget = _max_dst_units(src, target_language)
+    if budget is None:
+        return False
+    return _dst_units(dst, target_language) > budget
+
+
+def _compact_fallback(src: str, dst: str, target_language: str) -> str:
+    gloss = _short_glossary_dst(src, target_language)
+    if gloss:
+        return gloss
+    budget = _max_dst_units(src, target_language)
+    if budget is None:
+        return _post_process(dst, target_language)
+    kept: list[str] = []
+    units = 0
+    for ch in dst.strip():
+        is_unit = ("\u4e00" <= ch <= "\u9fff") or ch.isalnum() if target_language == "zh" else ch.isalnum()
+        if is_unit:
+            if units >= budget:
+                break
+            units += 1
+        kept.append(ch)
+    compact = "".join(kept).strip(" ,，、；：;:.…")
+    if compact:
+        return _post_process(compact, target_language)
+    # Last resort: keep source tokens so TTS stays short instead of hallucinating.
+    return _post_process(" ".join(_src_words(src)) or src.strip(), target_language)
+
+
 def _translate_plain(
     text: str,
     target_language: str,
@@ -408,15 +515,31 @@ def translate_sentence(
     model: str,
     system: str,
 ) -> str:
+    gloss = _short_glossary_dst(text, target_language)
+    if gloss is not None and len(_src_words(text)) <= 2:
+        # Ultra-short tutorial crumbs: skip the model to avoid welcome-speech hallucination.
+        return gloss
+
     last_error: Exception | None = None
+    overlong_retry_done = False
     for attempt in range(TRANSLATE_RETRY):
         try:
-            if attempt == 0:
+            if attempt == 0 and not overlong_retry_done:
                 user = (
                     "Translate the following sentence.\n"
                     'Return ONLY a JSON object with key dst.\n'
                     'Example: {"dst":"翻译结果"}\n\n'
                     f"{text}"
+                )
+            elif overlong_retry_done:
+                budget = _max_dst_units(text, target_language) or 8
+                user = (
+                    "Previous translation was far too long for this short source. "
+                    "Translate again with NO expansion, NO greeting, NO tutorial filler. "
+                    f"Keep the result within about {budget} characters/words. "
+                    'Return ONLY a JSON object with key dst.\n'
+                    'Example: {"dst":"像这样"}\n\n'
+                    f"Source text:\n{text}"
                 )
             else:
                 user = (
@@ -430,7 +553,22 @@ def translate_sentence(
             item = TranslationItem.model_validate(data)
             if not item.dst.strip():
                 raise ValueError("empty dst")
-            return _post_process(item.dst, target_language)
+            dst = _post_process(item.dst, target_language)
+            if _is_overlong_translation(text, dst, target_language):
+                if not overlong_retry_done:
+                    overlong_retry_done = True
+                    log.warning(
+                        "overlong translation for short src %r -> %r; retrying compact",
+                        text[:40],
+                        dst[:60],
+                    )
+                    continue
+                log.warning(
+                    "overlong translation persisted for %r; using compact fallback",
+                    text[:40],
+                )
+                return _compact_fallback(text, dst, target_language)
+            return dst
         except Exception as exc:
             last_error = exc
             if not _is_retryable_translate_error(exc) or attempt + 1 >= TRANSLATE_RETRY:
@@ -438,8 +576,13 @@ def translate_sentence(
             log.warning("translate attempt %d failed for %r: %s", attempt + 1, text[:60], exc)
             time.sleep(min(2**attempt, 8))
     try:
-        return _translate_plain(text, target_language, client, model, system)
+        dst = _translate_plain(text, target_language, client, model, system)
+        if _is_overlong_translation(text, dst, target_language):
+            return _compact_fallback(text, dst, target_language)
+        return dst
     except Exception as plain_exc:
+        if gloss is not None:
+            return gloss
         raise RuntimeError(
             f"translate_sentence failed after {TRANSLATE_RETRY} attempts: {last_error}; "
             f"plain fallback: {plain_exc}"

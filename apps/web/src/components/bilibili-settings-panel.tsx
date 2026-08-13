@@ -35,7 +35,7 @@ export function BilibiliSettingsPanel({ active }: { active: boolean }) {
       .then(([auth, settings]) => {
         setLoggedIn(Boolean(auth.logged_in))
         setUname(auth.uname || "")
-        setDefaultTid(String(settings.default_tid || 201))
+        setDefaultTid(String(settings.default_tid || 229))
         setDefaultTag(settings.default_tag || "配音")
         setVideoDir(settings.video_dir || "")
         setMessage("")
@@ -101,7 +101,7 @@ export function BilibiliSettingsPanel({ active }: { active: boolean }) {
     setError("")
     try {
       const settings = await saveBilibiliSettings({
-        default_tid: Number(defaultTid.replace(/[^0-9]/g, "") || 201),
+        default_tid: Number(defaultTid.replace(/[^0-9]/g, "") || 229),
         default_tag: defaultTag.trim() || "配音",
         default_copyright: 1,
         video_dir: videoDir.trim(),

@@ -166,10 +166,11 @@ export default function Home() {
   const [localSubtitleFile, setLocalSubtitleFile] = useState<File | null>(null)
   const [localDirection, setLocalDirection] = useState<LocalDirection>("en-zh")
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("auto")
-  const [audioMode, setAudioMode] = useState<AudioMode>("keep_bgm")
-  const [ttsProvider, setTtsProvider] = useState<TtsProvider>("voxcpm")
+  const [audioMode, setAudioMode] = useState<AudioMode>("replace")
+  const [ttsProvider, setTtsProvider] = useState<TtsProvider>("azure")
   const [bilibiliTid, setBilibiliTid] = useState(DEFAULT_BILIBILI_TID)
   const [bilibiliAutoPublish, setBilibiliAutoPublish] = useState(true)
+  const [bilibiliGenerateMeta, setBilibiliGenerateMeta] = useState(true)
   const [tasks, setTasks] = useState<TaskSummary[]>([])
   const [taskTotal, setTaskTotal] = useState(0)
   const [activeTaskCount, setActiveTaskCount] = useState<number | null>(null)
@@ -242,6 +243,11 @@ export default function Home() {
     { value: "true", label: t.home.bilibiliAutoPublishYes },
     { value: "false", label: t.home.bilibiliAutoPublishNo },
   ]
+  const bilibiliGenerateMetaOptions: { value: "true" | "false"; label: string }[] = [
+    { value: "true", label: t.home.bilibiliGenerateMetaYes },
+    { value: "false", label: t.home.bilibiliGenerateMetaNo },
+  ]
+  const effectiveGenerateMeta = bilibiliAutoPublish ? true : bilibiliGenerateMeta
 
   const statusOptions: { value: TaskListStatus; label: string }[] = [
     { value: "all", label: t.home.allStatuses },
@@ -475,6 +481,7 @@ export default function Home() {
           ttsProvider,
           bilibiliTid,
           bilibiliAutoPublish,
+          effectiveGenerateMeta,
         )
         const createdCount = result.created.length
         const failedCount = result.errors.length
@@ -516,6 +523,7 @@ export default function Home() {
         ttsProvider,
         bilibiliTid,
         bilibiliAutoPublish,
+        effectiveGenerateMeta,
       )
       const createdCount = result.created.length
       const existingCount = result.existing.length
@@ -768,7 +776,11 @@ export default function Home() {
                 <Label htmlFor="bilibili-auto-publish">{t.home.bilibiliAutoPublishLabel}</Label>
                 <Select
                   value={bilibiliAutoPublish ? "true" : "false"}
-                  onValueChange={(value) => setBilibiliAutoPublish(value === "true")}
+                  onValueChange={(value) => {
+                    const next = value === "true"
+                    setBilibiliAutoPublish(next)
+                    if (next) setBilibiliGenerateMeta(true)
+                  }}
                 >
                   <SelectTrigger id="bilibili-auto-publish" className="h-10">
                     <span className="min-w-0 truncate text-left">
@@ -787,6 +799,38 @@ export default function Home() {
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">{t.home.bilibiliAutoPublishHelp}</p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="bilibili-generate-meta">{t.home.bilibiliGenerateMetaLabel}</Label>
+                <Select
+                  value={effectiveGenerateMeta ? "true" : "false"}
+                  onValueChange={(value) => {
+                    if (bilibiliAutoPublish) return
+                    setBilibiliGenerateMeta(value === "true")
+                  }}
+                  disabled={bilibiliAutoPublish}
+                >
+                  <SelectTrigger id="bilibili-generate-meta" className="h-10">
+                    <span className="min-w-0 truncate text-left">
+                      {selectedLabel(
+                        bilibiliGenerateMetaOptions,
+                        effectiveGenerateMeta ? "true" : "false",
+                      )}
+                    </span>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {bilibiliGenerateMetaOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {bilibiliAutoPublish
+                    ? t.home.bilibiliGenerateMetaLocked
+                    : t.home.bilibiliGenerateMetaHelp}
+                </p>
               </div>
               <div className="flex items-center justify-between gap-3">
                 {activeTaskCount !== null && activeTaskCount > 0 ? (

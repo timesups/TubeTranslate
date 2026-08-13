@@ -531,9 +531,9 @@ describe("任务搜索校验错误", () => {
         "https://www.youtube.com/watch?v=batchbbb002",
       ],
       execution_mode: "auto",
-      audio_mode: "keep_bgm",
-      tts_provider: "voxcpm",
-      bilibili_tid: 201,
+      audio_mode: "replace",
+      tts_provider: "azure",
+      bilibili_tid: 229,
     })
   })
 })

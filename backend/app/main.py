@@ -65,19 +65,21 @@ def mask_secret(value: str) -> str:
 class TaskCreate(BaseModel):
     url: str
     execution_mode: str = "auto"
-    audio_mode: str = "keep_bgm"
-    tts_provider: str = "voxcpm"
-    bilibili_tid: int = 201
+    audio_mode: str = "replace"
+    tts_provider: str = "azure"
+    bilibili_tid: int = 229
     bilibili_auto_publish: bool = True
+    bilibili_generate_meta: bool = True
 
 
 class TaskBatchCreate(BaseModel):
     urls: list[str]
     execution_mode: str = "auto"
-    audio_mode: str = "keep_bgm"
-    tts_provider: str = "voxcpm"
-    bilibili_tid: int = 201
+    audio_mode: str = "replace"
+    tts_provider: str = "azure"
+    bilibili_tid: int = 229
     bilibili_auto_publish: bool = True
+    bilibili_generate_meta: bool = True
 
 
 class TaskBatchDelete(BaseModel):
@@ -446,6 +448,20 @@ def normalize_bilibili_auto_publish(value: bool | int | str) -> bool:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+def normalize_bilibili_generate_meta(
+    value: bool | int | str,
+    *,
+    bilibili_auto_publish: bool,
+) -> bool:
+    try:
+        return database.resolve_bilibili_generate_meta(
+            value,
+            bilibili_auto_publish=bilibili_auto_publish,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.post("/api/tasks", status_code=201)
 def create_task(payload: TaskCreate) -> dict:
     try:
@@ -458,6 +474,7 @@ def create_task(payload: TaskCreate) -> dict:
         return database.get_task(existing_id)
 
     _ensure_runtime_ready()
+    auto_publish = normalize_bilibili_auto_publish(payload.bilibili_auto_publish)
     task_id = database.create_task(
         validated_url.url,
         task_id=validated_url.video_id,
@@ -465,7 +482,11 @@ def create_task(payload: TaskCreate) -> dict:
         audio_mode=normalize_audio_mode(payload.audio_mode),
         tts_provider=normalize_tts_provider(payload.tts_provider),
         bilibili_tid=normalize_bilibili_tid(payload.bilibili_tid),
-        bilibili_auto_publish=normalize_bilibili_auto_publish(payload.bilibili_auto_publish),
+        bilibili_auto_publish=auto_publish,
+        bilibili_generate_meta=normalize_bilibili_generate_meta(
+            payload.bilibili_generate_meta,
+            bilibili_auto_publish=auto_publish,
+        ),
     )
     worker.enqueue(task_id)
     return database.get_task(task_id)
@@ -499,6 +520,10 @@ def create_tasks_batch(payload: TaskBatchCreate) -> dict:
     tts_provider = normalize_tts_provider(payload.tts_provider)
     bilibili_tid = normalize_bilibili_tid(payload.bilibili_tid)
     bilibili_auto_publish = normalize_bilibili_auto_publish(payload.bilibili_auto_publish)
+    bilibili_generate_meta = normalize_bilibili_generate_meta(
+        payload.bilibili_generate_meta,
+        bilibili_auto_publish=bilibili_auto_publish,
+    )
 
     created: list[dict] = []
     existing: list[dict] = []
@@ -545,6 +570,7 @@ def create_tasks_batch(payload: TaskBatchCreate) -> dict:
                 tts_provider=tts_provider,
                 bilibili_tid=bilibili_tid,
                 bilibili_auto_publish=bilibili_auto_publish,
+                bilibili_generate_meta=bilibili_generate_meta,
             )
             worker.enqueue(task_id)
             task = database.get_task(task_id)
@@ -635,10 +661,11 @@ def upload_local_video(
     file: UploadFile = File(...),
     subtitle_file: UploadFile | None = File(None),
     execution_mode: str = Form("auto"),
-    audio_mode: str = Form("keep_bgm"),
-    tts_provider: str = Form("voxcpm"),
-    bilibili_tid: int = Form(201),
+    audio_mode: str = Form("replace"),
+    tts_provider: str = Form("azure"),
+    bilibili_tid: int = Form(229),
     bilibili_auto_publish: str = Form("true"),
+    bilibili_generate_meta: str = Form("true"),
 ) -> dict:
     if direction not in LOCAL_UPLOAD_DIRECTIONS:
         raise HTTPException(status_code=422, detail="Unsupported local video direction.")
@@ -653,6 +680,10 @@ def upload_local_video(
     normalized_tts_provider = normalize_tts_provider(tts_provider)
     normalized_bilibili_tid = normalize_bilibili_tid(bilibili_tid)
     normalized_auto_publish = normalize_bilibili_auto_publish(bilibili_auto_publish)
+    normalized_generate_meta = normalize_bilibili_generate_meta(
+        bilibili_generate_meta,
+        bilibili_auto_publish=normalized_auto_publish,
+    )
     _ensure_runtime_ready()
 
     task_id = str(uuid.uuid4())
@@ -682,6 +713,7 @@ def upload_local_video(
             tts_provider=normalized_tts_provider,
             bilibili_tid=normalized_bilibili_tid,
             bilibili_auto_publish=normalized_auto_publish,
+            bilibili_generate_meta=normalized_generate_meta,
         )
         database.update_task(task_id, title=Path(original_name).stem)
         task = database.get_task(task_id)
@@ -869,6 +901,10 @@ def rerun_task(task_id: str) -> dict:
     bilibili_auto_publish = database.normalize_bilibili_auto_publish(
         task.get("bilibili_auto_publish")
     )
+    bilibili_generate_meta = database.resolve_bilibili_generate_meta(
+        task.get("bilibili_generate_meta"),
+        bilibili_auto_publish=bilibili_auto_publish,
+    )
     _purge_task(task)
     new_id = database.create_task(
         url,
@@ -878,6 +914,7 @@ def rerun_task(task_id: str) -> dict:
         tts_provider=tts_provider,
         bilibili_tid=bilibili_tid,
         bilibili_auto_publish=bilibili_auto_publish,
+        bilibili_generate_meta=bilibili_generate_meta,
     )
     worker.enqueue(new_id)
     return database.get_task(new_id)

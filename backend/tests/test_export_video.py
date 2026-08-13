@@ -264,3 +264,82 @@ def test_normalize_bilibili_auto_publish():
     assert database.normalize_bilibili_auto_publish(0) is False
     with pytest.raises(ValueError):
         database.normalize_bilibili_auto_publish("maybe")
+
+
+def test_resolve_bilibili_generate_meta_forced_when_publishing():
+    assert database.resolve_bilibili_generate_meta(False, bilibili_auto_publish=True) is True
+    assert database.resolve_bilibili_generate_meta(False, bilibili_auto_publish=False) is False
+    assert database.resolve_bilibili_generate_meta(True, bilibili_auto_publish=False) is True
+    assert database.resolve_bilibili_generate_meta(None, bilibili_auto_publish=False) is True
+
+
+def test_create_task_persists_generate_meta(monkeypatch, tmp_path):
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "test.sqlite")
+    database.init_db()
+    task_id = database.create_task(
+        "https://www.youtube.com/watch?v=genmetatest",
+        bilibili_auto_publish=False,
+        bilibili_generate_meta=False,
+    )
+    task = database.get_task(task_id)
+    assert task["bilibili_auto_publish"] is False
+    assert task["bilibili_generate_meta"] is False
+
+    forced = database.create_task(
+        "https://www.youtube.com/watch?v=genmetaforce",
+        bilibili_auto_publish=True,
+        bilibili_generate_meta=False,
+    )
+    assert database.get_task(forced)["bilibili_generate_meta"] is True
+
+
+def test_pipeline_skips_bilibili_meta_when_disabled(monkeypatch, tmp_path):
+    configure_db(monkeypatch, tmp_path)
+    task_id = database.create_task(
+        "https://www.youtube.com/watch?v=skipmetavid1",
+        bilibili_auto_publish=False,
+        bilibili_generate_meta=False,
+    )
+    database.update_task(task_id, title="Skip Meta")
+    session, final_video = _session_with_zh_subtitle(tmp_path)
+    export_dir = tmp_path / "skip-meta-out"
+    database.save_output_settings(str(export_dir))
+
+    def merge_video(self, task):
+        self.artifacts.session = session
+        self.artifacts.final_video = final_video
+
+    for name in (
+        "_download",
+        "_separate",
+        "_asr",
+        "_asr_fix",
+        "_translate",
+        "_split_audio",
+        "_tts",
+        "_merge_audio",
+        "_bilibili_publish",
+    ):
+        monkeypatch.setattr(PipelineRunner, name, lambda self, task: None)
+    monkeypatch.setattr(PipelineRunner, "_merge_video", merge_video)
+    monkeypatch.setattr("backend.app.pipeline.validate_runtime_device", lambda: None)
+    monkeypatch.setattr("backend.app.pipeline.device_plan_summary", lambda: "cpu")
+
+    called = {"generate": False}
+
+    async def boom(*_args, **_kwargs):
+        called["generate"] = True
+        raise AssertionError("generate_bilibili_meta should not run")
+
+    monkeypatch.setattr(
+        "backend.app.bilibili.deepseek_meta.generate_bilibili_meta",
+        boom,
+    )
+
+    PipelineRunner(task_id).run()
+    task = database.get_task(task_id)
+    assert task["status"] == "succeeded"
+    assert called["generate"] is False
+    assert not (session / "metadata" / "bilibili_meta.json").exists()
+    assert (export_dir / f"Skip_Meta__{task_id}.mp4").exists()
+    assert not (export_dir / f"Skip_Meta__{task_id}.bilibili.txt").exists()

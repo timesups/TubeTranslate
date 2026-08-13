@@ -16,7 +16,7 @@ def configure_db(monkeypatch, tmp_path):
 
 
 def test_normalize_audio_mode_defaults_and_rejects_invalid():
-    assert database.normalize_audio_mode(None) == "keep_bgm"
+    assert database.normalize_audio_mode(None) == "replace"
     assert database.normalize_audio_mode("replace") == "replace"
     with pytest.raises(ValueError, match="audio_mode must be one of"):
         database.normalize_audio_mode("mute")

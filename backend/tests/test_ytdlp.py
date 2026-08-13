@@ -59,9 +59,18 @@ def test_ytdlp_enables_node_js_runtime(tmp_path):
     assert options["js_runtimes"] == {"node": {}}
 
 
-def test_ytdlp_format_candidates_start_with_backend_format():
-    assert ytdlp.FORMAT_CANDIDATES[0] == "bestvideo[height<=1080]+bestaudio/best"
-    assert "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best" not in ytdlp.FORMAT_CANDIDATES
+def test_ytdlp_format_candidates_prefer_progressive_fallback():
+    assert "best[height<=1080]" in ytdlp.FORMAT_CANDIDATES[0]
+    assert ytdlp.FORMAT_CANDIDATES[-1] == "best"
+    assert () in ytdlp.YOUTUBE_PLAYER_CLIENTS
+
+
+def test_is_format_unavailable_strips_ansi():
+    exc = RuntimeError(
+        "\x1b[0;31mERROR:\x1b[0m [youtube] 4NbT_wAW9aQ: Requested format is not available. "
+        "Use --list-formats for a list of available formats"
+    )
+    assert ytdlp._is_format_unavailable(exc) is True
 
 
 def _youtube_source() -> SourceConfig:
@@ -133,6 +142,157 @@ def test_download_video_passes_only_the_canonical_url_to_both_ytdlp_sinks(
     assert downloaded_urls == [expected]
     assert (session / "media" / "video_source.mp4").read_bytes() == b"video"
     assert (session / "media" / "cover_source.jpg").read_bytes() == b"\xff\xd8\xffcover"
+
+
+class _FakeResponse:
+    content = b"\xff\xd8\xffcover"
+
+    def raise_for_status(self):
+        return None
+
+
+def _patch_cover(monkeypatch):
+    monkeypatch.setattr(ytdlp.requests, "get", lambda *args, **kwargs: _FakeResponse())
+    monkeypatch.setattr(
+        ytdlp,
+        "_save_cover_jpeg",
+        lambda image_bytes, dest: dest.write_bytes(image_bytes),
+    )
+
+
+def test_download_video_does_not_reuse_leftover_file(monkeypatch, tmp_path):
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def extract_info(self, url, *, download):
+            return {
+                "id": "abcdefghijk",
+                "uploader": "tester",
+                "title": "leftover",
+                "webpage_url": url,
+                "thumbnail": "https://i.ytimg.com/vi/abcdefghijk/maxresdefault.jpg",
+            }
+
+        def sanitize_info(self, info):
+            return info
+
+        def download(self, urls):
+            Path(self.options["outtmpl"]).write_bytes(b"fresh-video")
+
+    monkeypatch.setattr(ytdlp.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+    _patch_cover(monkeypatch)
+
+    session = tmp_path / "tester" / "leftover__abcdefghijk"
+    leftover = session / "media" / "video_source.mp4"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_bytes(b"corrupt-partial")
+
+    result, _ = ytdlp.download_video(
+        "https://www.youtube.com/watch?v=abcdefghijk",
+        tmp_path,
+        _youtube_source(),
+    )
+    assert (result / "media" / "video_source.mp4").read_bytes() == b"fresh-video"
+
+
+def test_download_video_deletes_partial_and_raises_on_403(monkeypatch, tmp_path):
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def extract_info(self, url, *, download):
+            return {
+                "id": "abcdefghijk",
+                "uploader": "tester",
+                "title": "forbidden",
+                "webpage_url": url,
+                "thumbnail": "https://i.ytimg.com/vi/abcdefghijk/maxresdefault.jpg",
+            }
+
+        def sanitize_info(self, info):
+            return info
+
+        def download(self, urls):
+            Path(self.options["outtmpl"]).write_bytes(b"partial")
+            raise ytdlp.yt_dlp.utils.DownloadError("ERROR: unable to download video data: HTTP Error 403: Forbidden")
+
+    monkeypatch.setattr(ytdlp.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+    _patch_cover(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="YouTube returned HTTP 403"):
+        ytdlp.download_video(
+            "https://www.youtube.com/watch?v=abcdefghijk",
+            tmp_path,
+            _youtube_source(),
+        )
+
+    leftover = tmp_path / "tester" / "forbidden__abcdefghijk" / "media" / "video_source.mp4"
+    assert not leftover.exists()
+
+
+def test_download_retries_403_with_next_player_client(monkeypatch, tmp_path):
+    seen_clients: list[list[str]] = []
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def extract_info(self, url, *, download):
+            return {
+                "id": "abcdefghijk",
+                "uploader": "tester",
+                "title": "retry403",
+                "webpage_url": url,
+                "thumbnail": "https://i.ytimg.com/vi/abcdefghijk/maxresdefault.jpg",
+            }
+
+        def sanitize_info(self, info):
+            return info
+
+        def download(self, urls):
+            clients = list(self.options.get("extractor_args", {}).get("youtube", {}).get("player_client") or [])
+            seen_clients.append(clients)
+            if clients == list(ytdlp.YOUTUBE_PLAYER_CLIENTS[0]):
+                raise ytdlp.yt_dlp.utils.DownloadError("HTTP Error 403: Forbidden")
+            Path(self.options["outtmpl"]).write_bytes(b"ok")
+
+    monkeypatch.setattr(ytdlp.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+    _patch_cover(monkeypatch)
+
+    session, _ = ytdlp.download_video(
+        "https://www.youtube.com/watch?v=abcdefghijk",
+        tmp_path,
+        _youtube_source(),
+    )
+    assert (session / "media" / "video_source.mp4").read_bytes() == b"ok"
+    assert seen_clients[0] == list(ytdlp.YOUTUBE_PLAYER_CLIENTS[0])
+    assert seen_clients[-1] == list(ytdlp.YOUTUBE_PLAYER_CLIENTS[1])
+
+
+def test_ydl_base_sets_youtube_player_clients(tmp_path):
+    options = ytdlp._ydl_base(_youtube_source(), "")
+    assert options["extractor_args"]["youtube"]["player_client"] == list(
+        ytdlp.YOUTUBE_PLAYER_CLIENTS[0]
+    )
 
 
 def test_pick_thumbnail_url_prefers_largest():

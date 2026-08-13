@@ -21,7 +21,7 @@ def load_settings() -> dict[str, Any]:
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     settings: dict[str, Any] = {
-        "default_tid": 201,
+        "default_tid": 229,
         "default_tag": "配音,翻译,教程",
         "default_copyright": 1,
         "video_dir": str((REPO_ROOT / "data" / "bilibili" / "staging").resolve()),

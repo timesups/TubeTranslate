@@ -119,6 +119,7 @@ export type Task = {
   tts_provider?: TtsProvider
   bilibili_tid?: number
   bilibili_auto_publish?: boolean
+  bilibili_generate_meta?: boolean
   stages: TaskStage[]
 }
 
@@ -244,6 +245,7 @@ export type TaskSummary = {
   tts_provider?: TtsProvider
   bilibili_tid?: number
   bilibili_auto_publish?: boolean
+  bilibili_generate_meta?: boolean
 }
 
 export type TaskListStatus = "all" | TaskStatus
@@ -397,10 +399,11 @@ export function parseVideoUrls(text: string): string[] {
 export function createTask(
   url: string,
   executionMode: ExecutionMode = "auto",
-  audioMode: AudioMode = "keep_bgm",
-  ttsProvider: TtsProvider = "voxcpm",
-  bilibiliTid: number = 201,
+  audioMode: AudioMode = "replace",
+  ttsProvider: TtsProvider = "azure",
+  bilibiliTid: number = 229,
   bilibiliAutoPublish: boolean = true,
+  bilibiliGenerateMeta: boolean = true,
 ) {
   return request<Task>("/api/tasks", {
     method: "POST",
@@ -411,6 +414,7 @@ export function createTask(
       tts_provider: ttsProvider,
       bilibili_tid: bilibiliTid,
       bilibili_auto_publish: bilibiliAutoPublish,
+      bilibili_generate_meta: bilibiliGenerateMeta,
     }),
   })
 }
@@ -418,10 +422,11 @@ export function createTask(
 export function createTasksBatch(
   urls: string[],
   executionMode: ExecutionMode = "auto",
-  audioMode: AudioMode = "keep_bgm",
-  ttsProvider: TtsProvider = "voxcpm",
-  bilibiliTid: number = 201,
+  audioMode: AudioMode = "replace",
+  ttsProvider: TtsProvider = "azure",
+  bilibiliTid: number = 229,
   bilibiliAutoPublish: boolean = true,
+  bilibiliGenerateMeta: boolean = true,
 ) {
   return request<TaskBatchResult>("/api/tasks/batch", {
     method: "POST",
@@ -432,6 +437,7 @@ export function createTasksBatch(
       tts_provider: ttsProvider,
       bilibili_tid: bilibiliTid,
       bilibili_auto_publish: bilibiliAutoPublish,
+      bilibili_generate_meta: bilibiliGenerateMeta,
     }),
   })
 }
@@ -441,10 +447,11 @@ export async function uploadLocalTask(
   direction: LocalDirection,
   subtitleFile: File | null = null,
   executionMode: ExecutionMode = "auto",
-  audioMode: AudioMode = "keep_bgm",
-  ttsProvider: TtsProvider = "voxcpm",
-  bilibiliTid: number = 201,
+  audioMode: AudioMode = "replace",
+  ttsProvider: TtsProvider = "azure",
+  bilibiliTid: number = 229,
   bilibiliAutoPublish: boolean = true,
+  bilibiliGenerateMeta: boolean = true,
 ) {
   const form = new FormData()
   form.append("direction", direction)
@@ -457,6 +464,7 @@ export async function uploadLocalTask(
   form.append("tts_provider", ttsProvider)
   form.append("bilibili_tid", String(bilibiliTid))
   form.append("bilibili_auto_publish", bilibiliAutoPublish ? "true" : "false")
+  form.append("bilibili_generate_meta", bilibiliGenerateMeta ? "true" : "false")
 
   const options: RequestInit = {
     method: "POST",
@@ -486,10 +494,11 @@ export async function uploadLocalTasks(
   direction: LocalDirection,
   subtitleFile: File | null = null,
   executionMode: ExecutionMode = "auto",
-  audioMode: AudioMode = "keep_bgm",
-  ttsProvider: TtsProvider = "voxcpm",
-  bilibiliTid: number = 201,
+  audioMode: AudioMode = "replace",
+  ttsProvider: TtsProvider = "azure",
+  bilibiliTid: number = 229,
   bilibiliAutoPublish: boolean = true,
+  bilibiliGenerateMeta: boolean = true,
 ): Promise<LocalUploadBatchResult> {
   const created: Task[] = []
   const errors: LocalUploadBatchError[] = []
@@ -506,6 +515,7 @@ export async function uploadLocalTasks(
         ttsProvider,
         bilibiliTid,
         bilibiliAutoPublish,
+        bilibiliGenerateMeta,
       )
       created.push(task)
     } catch (err) {

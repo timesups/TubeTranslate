@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from pydub import AudioSegment
@@ -10,6 +12,17 @@ from pydub import AudioSegment
 from ..devices import resolve_device
 
 _MODEL = None
+
+# Regroup Whisper word timestamps into longer utterances. Default segments are often
+# 1-word crumbs on tutorial speech; word-gap rechunking is the ASR-stage fix.
+RECHUNK_GAP_MS = 700
+RECHUNK_TERM_GAP_MS = 280
+RECHUNK_HUGE_GAP_MS = 1400
+RECHUNK_MAX_DURATION_MS = 12_000
+RECHUNK_MAX_WORDS = 48
+RECHUNK_MIN_WORDS_FOR_GAP = 3
+
+_TERMINAL_RE = re.compile(r"""[.!?…](?:["'`”’)\]]+)?\s*$""")
 
 
 def _whisper_cache_file(whisper, name: str, download_root: str | None) -> Path | None:
@@ -62,18 +75,34 @@ def _to_ms(seconds: float) -> int:
     return int(round(float(seconds) * 1000))
 
 
-def _convert_words(words: list) -> list:
-    return [
-        {
-            "text": w.get("word", ""),
-            "start_time": _to_ms(w.get("start", 0.0)),
-            "end_time": _to_ms(w.get("end", 0.0)),
-        }
-        for w in words or []
-    ]
+def _env_int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
-def _convert_segments(segments: list) -> list:
+def _convert_words(words: list) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+    for word in words or []:
+        text = word.get("word", "")
+        if not str(text).strip():
+            continue
+        converted.append(
+            {
+                "text": text,
+                "start_time": _to_ms(word.get("start", 0.0)),
+                "end_time": _to_ms(word.get("end", 0.0)),
+            }
+        )
+    return converted
+
+
+def _convert_segments(segments: list) -> list[dict[str, Any]]:
     return [
         {
             "text": seg.get("text", "").strip(),
@@ -82,7 +111,136 @@ def _convert_segments(segments: list) -> list:
             "words": _convert_words(seg.get("words", [])),
         }
         for seg in segments
+        if str(seg.get("text", "")).strip()
     ]
+
+
+def _flatten_words(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    words: list[dict[str, Any]] = []
+    for seg in segments:
+        seg_words = seg.get("words") or []
+        if seg_words:
+            words.extend(seg_words)
+            continue
+        text = str(seg.get("text") or "").strip()
+        if not text:
+            continue
+        # Fallback when word timestamps are missing: keep the segment as one token.
+        words.append(
+            {
+                "text": f" {text}",
+                "start_time": int(seg["start_time"]),
+                "end_time": int(seg["end_time"]),
+            }
+        )
+    return words
+
+
+def _join_word_texts(words: list[dict[str, Any]]) -> str:
+    # openai-whisper usually prefixes English tokens with a space.
+    return "".join(str(word.get("text") or "") for word in words).strip()
+
+
+def _has_terminal(text: str) -> bool:
+    return bool(_TERMINAL_RE.search((text or "").rstrip()))
+
+
+def rechunk_words(
+    words: list[dict[str, Any]],
+    *,
+    gap_ms: int | None = None,
+    term_gap_ms: int | None = None,
+    huge_gap_ms: int | None = None,
+    max_duration_ms: int | None = None,
+    max_words: int | None = None,
+    min_words_for_gap: int | None = None,
+) -> list[dict[str, Any]]:
+    """Build utterances from a flat word stream using silence + punctuation cues."""
+    if not words:
+        return []
+
+    gap_ms = gap_ms if gap_ms is not None else _env_int("WHISPER_RECHUNK_GAP_MS", RECHUNK_GAP_MS)
+    term_gap_ms = (
+        term_gap_ms
+        if term_gap_ms is not None
+        else _env_int("WHISPER_RECHUNK_TERM_GAP_MS", RECHUNK_TERM_GAP_MS)
+    )
+    huge_gap_ms = (
+        huge_gap_ms
+        if huge_gap_ms is not None
+        else _env_int("WHISPER_RECHUNK_HUGE_GAP_MS", RECHUNK_HUGE_GAP_MS)
+    )
+    max_duration_ms = (
+        max_duration_ms
+        if max_duration_ms is not None
+        else _env_int("WHISPER_RECHUNK_MAX_DURATION_MS", RECHUNK_MAX_DURATION_MS)
+    )
+    max_words = (
+        max_words if max_words is not None else _env_int("WHISPER_RECHUNK_MAX_WORDS", RECHUNK_MAX_WORDS)
+    )
+    min_words_for_gap = (
+        min_words_for_gap
+        if min_words_for_gap is not None
+        else _env_int("WHISPER_RECHUNK_MIN_WORDS_FOR_GAP", RECHUNK_MIN_WORDS_FOR_GAP)
+    )
+
+    chunks: list[list[dict[str, Any]]] = []
+    current = [words[0]]
+    for word in words[1:]:
+        prev = current[-1]
+        gap = int(word["start_time"]) - int(prev["end_time"])
+        duration = int(word["end_time"]) - int(current[0]["start_time"])
+        count = len(current) + 1
+        prev_term = _has_terminal(str(prev.get("text") or ""))
+
+        split = False
+        if count > max_words or duration > max_duration_ms:
+            split = True
+        elif prev_term and gap >= term_gap_ms:
+            split = True
+        elif gap >= huge_gap_ms:
+            split = True
+        elif gap >= gap_ms and len(current) >= min_words_for_gap:
+            split = True
+
+        if split:
+            chunks.append(current)
+            current = [word]
+        else:
+            current.append(word)
+    chunks.append(current)
+
+    utterances: list[dict[str, Any]] = []
+    for chunk in chunks:
+        text = _join_word_texts(chunk)
+        if not text:
+            continue
+        utterances.append(
+            {
+                "text": text,
+                "start_time": int(chunk[0]["start_time"]),
+                "end_time": int(chunk[-1]["end_time"]),
+                "words": [
+                    {
+                        "text": str(item.get("text") or ""),
+                        "start_time": int(item["start_time"]),
+                        "end_time": int(item["end_time"]),
+                    }
+                    for item in chunk
+                ],
+            }
+        )
+    return utterances
+
+
+def build_utterances_from_whisper_segments(segments: list) -> list[dict[str, Any]]:
+    """Convert Whisper segments, preferring word-gap rechunking over raw crumbs."""
+    converted = _convert_segments(segments)
+    words = _flatten_words(converted)
+    # Prefer rechunk whenever we have a real word stream (typically >> segment count).
+    if len(words) >= max(8, len(converted)):
+        return rechunk_words(words)
+    return converted
 
 
 def recognize_speech(vocals_file: Path, session: Path, language: str) -> Path:
@@ -100,7 +258,7 @@ def recognize_speech(vocals_file: Path, session: Path, language: str) -> Path:
         verbose=False,
     )
 
-    utterances = _convert_segments(result.get("segments", []))
+    utterances = build_utterances_from_whisper_segments(result.get("segments", []))
     if not utterances:
         raise RuntimeError("Whisper did not return any segments.")
 
