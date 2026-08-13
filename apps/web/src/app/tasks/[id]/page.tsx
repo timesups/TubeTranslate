@@ -282,6 +282,12 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                 </dd>
                 <dt className="text-muted-foreground">{t.task.bilibiliTid}</dt>
                 <dd>{bilibiliPartitionLabel(task.bilibili_tid ?? 201)}</dd>
+                <dt className="text-muted-foreground">{t.task.bilibiliAutoPublish}</dt>
+                <dd>
+                  {task.bilibili_auto_publish === false
+                    ? t.task.bilibiliAutoPublishNo
+                    : t.task.bilibiliAutoPublishYes}
+                </dd>
                 {task.session_path ? (
                   <>
                     <dt className="text-muted-foreground">{t.task.session}</dt>

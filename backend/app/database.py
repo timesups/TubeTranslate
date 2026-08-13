@@ -27,6 +27,7 @@ DEFAULT_AUDIO_MODE = "keep_bgm"
 TTS_PROVIDERS = ("voxcpm", "volcengine", "azure")
 DEFAULT_TTS_PROVIDER = "voxcpm"
 DEFAULT_BILIBILI_TID = 201  # 知识区 · 科学科普
+DEFAULT_BILIBILI_AUTO_PUBLISH = True
 
 
 def now_iso() -> str:
@@ -68,7 +69,8 @@ def init_db() -> None:
               execution_mode TEXT NOT NULL DEFAULT 'auto',
               audio_mode TEXT NOT NULL DEFAULT 'keep_bgm',
               tts_provider TEXT NOT NULL DEFAULT 'voxcpm',
-              bilibili_tid INTEGER NOT NULL DEFAULT 201
+              bilibili_tid INTEGER NOT NULL DEFAULT 201,
+              bilibili_auto_publish INTEGER NOT NULL DEFAULT 1
             );
 
             CREATE TABLE IF NOT EXISTS task_stages (
@@ -152,6 +154,10 @@ def init_db() -> None:
         if "bilibili_tid" not in task_columns:
             conn.execute(
                 "ALTER TABLE tasks ADD COLUMN bilibili_tid INTEGER NOT NULL DEFAULT 201"
+            )
+        if "bilibili_auto_publish" not in task_columns:
+            conn.execute(
+                "ALTER TABLE tasks ADD COLUMN bilibili_auto_publish INTEGER NOT NULL DEFAULT 1"
             )
         stage_columns = {row["name"] for row in conn.execute("PRAGMA table_info(task_stages)").fetchall()}
         if "progress" not in stage_columns:
@@ -375,6 +381,29 @@ def normalize_bilibili_tid(value: int | str | None) -> int:
     return _normalize(value)
 
 
+def normalize_bilibili_auto_publish(value: bool | int | str | None) -> bool:
+    if value is None or value == "":
+        return DEFAULT_BILIBILI_AUTO_PUBLISH
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        raise ValueError("bilibili_auto_publish must be 0 or 1")
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "publish"}:
+        return True
+    if text in {"0", "false", "no", "off", "export"}:
+        return False
+    raise ValueError("bilibili_auto_publish must be a boolean")
+
+
+def _serialize_task_fields(data: dict[str, Any]) -> dict[str, Any]:
+    if "bilibili_auto_publish" in data:
+        data["bilibili_auto_publish"] = bool(data["bilibili_auto_publish"])
+    return data
+
+
 def create_task(
     url: str,
     task_id: str | None = None,
@@ -383,6 +412,7 @@ def create_task(
     audio_mode: str = DEFAULT_AUDIO_MODE,
     tts_provider: str = DEFAULT_TTS_PROVIDER,
     bilibili_tid: int = DEFAULT_BILIBILI_TID,
+    bilibili_auto_publish: bool = DEFAULT_BILIBILI_AUTO_PUBLISH,
 ) -> str:
     new_id = task_id or str(uuid.uuid4())
     created_at = now_iso()
@@ -390,14 +420,15 @@ def create_task(
     resolved_audio_mode = normalize_audio_mode(audio_mode)
     resolved_tts_provider = normalize_tts_provider(tts_provider)
     resolved_tid = normalize_bilibili_tid(bilibili_tid)
+    resolved_auto_publish = 1 if normalize_bilibili_auto_publish(bilibili_auto_publish) else 0
     with connect() as conn:
         conn.execute(
             """
             INSERT INTO tasks (
               id, url, status, current_stage, created_at,
-              execution_mode, audio_mode, tts_provider, bilibili_tid
+              execution_mode, audio_mode, tts_provider, bilibili_tid, bilibili_auto_publish
             )
-            VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 new_id,
@@ -408,6 +439,7 @@ def create_task(
                 resolved_audio_mode,
                 resolved_tts_provider,
                 resolved_tid,
+                resolved_auto_publish,
             ),
         )
         conn.executemany(
@@ -447,7 +479,8 @@ def latest_task_id() -> str | None:
 
 TASK_SUMMARY_COLUMNS = (
     "id, url, title, status, current_stage, final_video_path, error_message, "
-    "created_at, started_at, completed_at, execution_mode, audio_mode, tts_provider, bilibili_tid"
+    "created_at, started_at, completed_at, execution_mode, audio_mode, tts_provider, "
+    "bilibili_tid, bilibili_auto_publish"
 )
 
 TASK_LIST_SORTS = {
@@ -487,7 +520,7 @@ def list_tasks(limit: int = 100) -> list[dict[str, Any]]:
             "ORDER BY created_at DESC, rowid DESC LIMIT ?",
             (limit,),
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [_serialize_task_fields(dict(row)) for row in rows]
 
 
 def list_tasks_page(
@@ -539,7 +572,7 @@ def list_tasks_page(
         ).fetchall()
 
     return {
-        "tasks": [dict(row) for row in rows],
+        "tasks": [_serialize_task_fields(dict(row)) for row in rows],
         "total": counts["filtered_total"],
         "active_count": counts["active_count"],
         "page": page,
@@ -567,7 +600,7 @@ def get_task(task_id: str) -> dict[str, Any] | None:
             """,
             (task_id,),
         ).fetchall()
-    result = dict(task)
+    result = _serialize_task_fields(dict(task))
     result["stages"] = [dict(stage) for stage in stages]
     return result
 

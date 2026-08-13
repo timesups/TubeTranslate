@@ -44,7 +44,8 @@ def test_fix_asr_sentences_drops_empty_text(tmp_path):
 
 
 def test_fix_asr_sentences_applies_padding_within_gap(tmp_path):
-    utts = [_utt("a", 1000, 2000), _utt("b", 3000, 4000)]
+    # Large gap keeps fragments separate so padding behavior stays observable.
+    utts = [_utt("Alpha done.", 1000, 2000), _utt("Beta done.", 3000, 4000)]
     asr_file, session = _write_asr(tmp_path, utts, duration=5000)
 
     fixed = asr_sentence_fixer.fix_asr_sentences(asr_file, session, start_pad=100, end_pad=300)
@@ -57,7 +58,7 @@ def test_fix_asr_sentences_applies_padding_within_gap(tmp_path):
 
 
 def test_fix_asr_sentences_clamps_to_duration(tmp_path):
-    utts = [_utt("only", 100, 4900)]
+    utts = [_utt("Only one sentence.", 100, 4900)]
     asr_file, session = _write_asr(tmp_path, utts, duration=5000)
 
     fixed = asr_sentence_fixer.fix_asr_sentences(asr_file, session, start_pad=200, end_pad=500)
@@ -75,7 +76,7 @@ def test_fix_asr_sentences_raises_when_empty(tmp_path):
 
 
 def test_fix_asr_sentences_reuses_cache(tmp_path):
-    utts = [_utt("hi", 0, 500)]
+    utts = [_utt("hi there.", 0, 500)]
     asr_file, session = _write_asr(tmp_path, utts)
 
     first = asr_sentence_fixer.fix_asr_sentences(asr_file, session)
@@ -83,3 +84,114 @@ def test_fix_asr_sentences_reuses_cache(tmp_path):
     second = asr_sentence_fixer.fix_asr_sentences(asr_file, session)
 
     assert json.loads(second.read_text(encoding="utf-8")) == {"already": True}
+
+
+def test_merge_english_utterances_joins_mid_clause_fragments():
+    utts = [
+        _utt("to really be", 100, 400),
+        _utt("a 3D artist", 420, 800),
+        _utt("that understands topology.", 820, 1400),
+        _utt("And as always,", 1800, 2200),
+        _utt("check my courses.", 2220, 2600),
+    ]
+    merged = asr_sentence_fixer.merge_english_utterances(utts)
+    assert [u["text"] for u in merged] == [
+        "to really be a 3D artist that understands topology.",
+        "And as always, check my courses.",
+    ]
+    assert merged[0]["start_time"] == 100
+    assert merged[0]["end_time"] == 1400
+
+
+def test_merge_english_utterances_keeps_sentence_boundary():
+    utts = [
+        _utt("This is done.", 0, 500),
+        _utt("Next topic starts here.", 700, 1400),
+    ]
+    merged = asr_sentence_fixer.merge_english_utterances(utts)
+    assert len(merged) == 2
+
+
+def test_merge_english_utterances_absorbs_filler():
+    utts = [
+        _utt("Look at the density.", 0, 800),
+        _utt("right?", 820, 950),
+        _utt("Again,", 1000, 1200),
+        _utt("you'll see examples.", 1220, 1800),
+    ]
+    merged = asr_sentence_fixer.merge_english_utterances(utts)
+    assert [u["text"] for u in merged] == [
+        "Look at the density. right?",
+        "Again, you'll see examples.",
+    ]
+
+
+def test_merge_english_utterances_respects_gap_limit():
+    utts = [
+        _utt("All of this will be", 0, 500),
+        _utt("completely available.", 1300, 1800),  # gap 800 > 600
+    ]
+    merged = asr_sentence_fixer.merge_english_utterances(utts)
+    assert len(merged) == 2
+
+
+def test_merge_english_utterances_allows_small_pause():
+    utts = [
+        _utt("All of this will be", 0, 500),
+        _utt("completely available.", 1040, 1600),  # gap 540 <= 600
+    ]
+    merged = asr_sentence_fixer.merge_english_utterances(utts)
+    assert [u["text"] for u in merged] == ["All of this will be completely available."]
+
+
+def test_fix_asr_sentences_merges_english(tmp_path):
+    utts = [
+        _utt("All of this will be", 1000, 1400),
+        _utt("completely available.", 1450, 2000),
+        _utt("I'll put the link", 2100, 2500),
+        _utt("in the description below.", 2520, 3100),
+    ]
+    asr_file, session = _write_asr(tmp_path, utts, duration=4000)
+
+    fixed = asr_sentence_fixer.fix_asr_sentences(
+        asr_file, session, language="en", start_pad=0, end_pad=0
+    )
+    out = json.loads(fixed.read_text(encoding="utf-8"))["result"]["utterances"]
+    assert [u["text"] for u in out] == [
+        "All of this will be completely available.",
+        "I'll put the link in the description below.",
+    ]
+
+
+def test_fix_asr_sentences_skips_merge_for_chinese(tmp_path):
+    utts = [
+        _utt("这是一句", 0, 400),
+        _utt("被切开的中文", 420, 900),
+    ]
+    asr_file, session = _write_asr(tmp_path, utts)
+
+    fixed = asr_sentence_fixer.fix_asr_sentences(
+        asr_file, session, language="zh", start_pad=0, end_pad=0
+    )
+    out = json.loads(fixed.read_text(encoding="utf-8"))["result"]["utterances"]
+    assert [u["text"] for u in out] == ["这是一句", "被切开的中文"]
+
+
+def test_merge_preserves_words_when_present():
+    utts = [
+        {
+            "text": "to really be",
+            "start_time": 0,
+            "end_time": 300,
+            "words": [{"text": "to"}, {"text": "really"}, {"text": "be"}],
+        },
+        {
+            "text": "a artist.",
+            "start_time": 320,
+            "end_time": 700,
+            "words": [{"text": "a"}, {"text": "artist."}],
+        },
+    ]
+    merged = asr_sentence_fixer.merge_english_utterances(utts)
+    assert len(merged) == 1
+    assert len(merged[0]["words"]) == 5

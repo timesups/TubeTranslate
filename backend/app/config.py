@@ -102,6 +102,91 @@ def ffprobe_binary() -> str:
     return os.getenv("FFPROBE_PATH", "").strip() or "ffprobe"
 
 
+def _ffmpeg_bin_directories() -> list[Path]:
+    """Resolve directories that contain FFmpeg shared DLLs (Windows TorchCodec)."""
+    candidates: list[Path] = []
+
+    for env_name in ("FFMPEG_PATH", "FFPROBE_PATH"):
+        raw = os.getenv(env_name, "").strip().strip('"')
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        if path.is_file():
+            candidates.append(path.parent)
+        elif path.is_dir():
+            candidates.append(path)
+        elif path.parent.is_dir():
+            # Env often points at ffmpeg.exe before the file is validated.
+            candidates.append(path.parent)
+
+    # Also accept a bin dir already present on PATH (start.bat / system PATH).
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        path = Path(entry)
+        if (path / "avutil-60.dll").exists() or (path / "avcodec-62.dll").exists():
+            candidates.append(path)
+            continue
+        # Broader match for other FFmpeg major versions.
+        try:
+            if any(path.glob("avutil-*.dll")) and any(path.glob("avcodec-*.dll")):
+                candidates.append(path)
+        except OSError:
+            continue
+
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in candidates:
+        key = os.path.normcase(str(path.resolve())) if path.exists() else os.path.normcase(str(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+_FFMPEG_DLL_DIRS_REGISTERED = False
+
+
+def ensure_ffmpeg_dll_search_path() -> list[str]:
+    """Make FFmpeg full-shared DLLs visible to TorchCodec on Windows.
+
+    Python 3.8+ on Windows does not search PATH for dependent DLLs of
+    extension modules. TorchCodec needs ``os.add_dll_directory`` pointing at
+    the FFmpeg full-shared ``bin`` folder before ``import torchcodec``.
+    """
+    global _FFMPEG_DLL_DIRS_REGISTERED
+    directories = [path for path in _ffmpeg_bin_directories() if path.is_dir()]
+    registered: list[str] = []
+    if not directories:
+        return registered
+
+    path_entries = os.environ.get("PATH", "").split(os.pathsep)
+    prepend: list[str] = []
+    for directory in directories:
+        directory_str = str(directory)
+        registered.append(directory_str)
+        if os.name == "nt":
+            add_dll_directory = getattr(os, "add_dll_directory", None)
+            if callable(add_dll_directory):
+                try:
+                    add_dll_directory(directory_str)
+                except (FileNotFoundError, OSError):
+                    continue
+        if directory_str not in path_entries and directory_str not in prepend:
+            prepend.append(directory_str)
+
+    if prepend:
+        os.environ["PATH"] = os.pathsep.join([*prepend, *path_entries])
+
+    _FFMPEG_DLL_DIRS_REGISTERED = True
+    return registered
+
+
+# Register as early as possible so Demucs / TorchCodec can load FFmpeg DLLs.
+ensure_ffmpeg_dll_search_path()
+
+
 def ytdlp_defaults() -> dict[str, str]:
     return {
         "proxy_port": os.getenv("YTDLP_PROXY_PORT", ""),

@@ -181,6 +181,34 @@ def _normalize_meta(data: dict[str, Any], *, filename: str) -> dict[str, Any]:
     }
 
 
+def append_original_video_link(
+    desc: str,
+    source_url: str | None,
+    *,
+    max_len: int = 2000,
+) -> str:
+    """Append a YouTube original-video line to the generated description."""
+    from ..youtube import is_youtube_url, validate_video_url
+
+    text = (desc or "").strip()
+    url = (source_url or "").strip()
+    if not text or not url or not is_youtube_url(url):
+        return text[:max_len]
+
+    link = validate_video_url(url).url
+    marker = f"原视频：{link}"
+    if link in text or "原视频：" in text:
+        return text[:max_len]
+
+    overhead = 2 + len(marker)  # "\n\n" + marker
+    body = text
+    if len(body) + overhead > max_len:
+        body = body[: max(0, max_len - overhead)].rstrip()
+    if not body:
+        return marker[:max_len]
+    return f"{body}\n\n{marker}"
+
+
 def _fallback_meta(*, filename: str, subtitle_text: str) -> dict[str, Any]:
     stem = Path(filename).stem[:80] or "配音视频"
     lines = [line.strip() for line in subtitle_text.splitlines() if line.strip()]
@@ -349,13 +377,18 @@ async def generate_bilibili_meta(
     *,
     filename: str,
     subtitle_text: str,
+    source_url: str | None = None,
     api_key: str | None = None,
     model: str | None = None,
 ) -> dict[str, Any]:
     # api_key / model kept for call-site compatibility; OpenAI settings are authoritative.
     del api_key, model
-    return await asyncio.to_thread(
+    meta = await asyncio.to_thread(
         _generate_sync,
         filename=filename,
         subtitle_text=subtitle_text,
     )
+    if source_url:
+        meta = dict(meta)
+        meta["desc"] = append_original_video_link(meta["desc"], source_url)
+    return meta

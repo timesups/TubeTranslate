@@ -75,6 +75,21 @@ def _find_item(item_id: str) -> dict[str, Any]:
     raise HTTPException(status_code=404, detail=f"未找到视频：{item_id}")
 
 
+def _task_url_for_staging_item(item: dict[str, Any]) -> str | None:
+    """Staging stems are `{title}__{task_id}`; recover the task URL when present."""
+    stem = str(item.get("stem") or item.get("id") or "")
+    if "__" not in stem:
+        return None
+    task_id = stem.rsplit("__", 1)[-1].strip()
+    if not task_id:
+        return None
+    task = database.get_task(task_id)
+    if not task:
+        return None
+    url = str(task.get("url") or "").strip()
+    return url or None
+
+
 @router.get("/auth/status")
 async def auth_status() -> dict[str, Any]:
     return await auth.get_login_status()
@@ -196,7 +211,11 @@ async def generate(body: GenerateBody) -> dict[str, Any]:
         subtitle = read_srt(Path(item["srt_path"]))
         if not subtitle:
             raise RuntimeError("字幕内容为空")
-        meta = await generate_bilibili_meta(filename=item["name"], subtitle_text=subtitle)
+        meta = await generate_bilibili_meta(
+            filename=item["name"],
+            subtitle_text=subtitle,
+            source_url=_task_url_for_staging_item(item),
+        )
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

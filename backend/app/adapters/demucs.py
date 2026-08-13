@@ -1,15 +1,50 @@
 from __future__ import annotations
 
+import ctypes
+import logging
 import sys
 from pathlib import Path
 from typing import Callable
 
-from ..config import REPO_ROOT
+from ..config import REPO_ROOT, ensure_ffmpeg_dll_search_path
 from ..devices import resolve_device
+
+log = logging.getLogger(__name__)
 
 
 def _device() -> str:
     return resolve_device("demucs").selected
+
+
+def _preload_ffmpeg_shared_libraries() -> None:
+    """Force-load FFmpeg DLLs before TorchCodec probes libtorchcodec_core*.dll."""
+    directories = ensure_ffmpeg_dll_search_path()
+    if not directories:
+        log.warning(
+            "FFmpeg full-shared bin/ not found; Demucs/TorchCodec may fail on Windows. "
+            "Set FFMPEG_PATH to ffmpeg.exe from a full-shared build."
+        )
+        return
+
+    # Load in dependency order; missing optional libs are fine.
+    patterns = (
+        "avutil-*.dll",
+        "swresample-*.dll",
+        "swscale-*.dll",
+        "avcodec-*.dll",
+        "avformat-*.dll",
+        "avfilter-*.dll",
+        "avdevice-*.dll",
+        "postproc-*.dll",
+    )
+    for directory in directories:
+        root = Path(directory)
+        for pattern in patterns:
+            for dll in sorted(root.glob(pattern)):
+                try:
+                    ctypes.WinDLL(str(dll))
+                except OSError as exc:
+                    log.debug("skip ffmpeg dll %s: %s", dll.name, exc)
 
 
 def _demucs_progress(info: dict, shifts: int) -> int:
@@ -29,6 +64,10 @@ def separate_audio(
     session: Path,
     progress_callback: Callable[[int, str], None] | None = None,
 ) -> tuple[Path, Path]:
+    # Windows: TorchCodec needs FFmpeg DLLs registered before torchaudio import.
+    if sys.platform == "win32":
+        _preload_ffmpeg_shared_libraries()
+
     demucs_path = _demucs_source_path()
     sys.path.insert(0, str(demucs_path))
 

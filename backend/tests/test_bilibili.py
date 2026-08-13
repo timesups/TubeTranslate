@@ -132,6 +132,51 @@ def test_generate_meta_uses_openai_settings(monkeypatch, tmp_path):
     assert result["title"] == "测试标题"
 
 
+def test_append_original_video_link_for_youtube_only():
+    desc = "这是 AI 生成的简介。"
+    yt = "https://www.youtube.com/watch?v=abcdefghijk"
+    out = deepseek_meta.append_original_video_link(desc, yt)
+    assert out.startswith(desc)
+    assert out.endswith(f"原视频：{yt}")
+
+    # Non-YouTube / empty: unchanged
+    assert deepseek_meta.append_original_video_link(desc, None) == desc
+    assert (
+        deepseek_meta.append_original_video_link(
+            desc, "https://www.bilibili.com/video/BV1xx411c7mD"
+        )
+        == desc
+    )
+
+    # Idempotent
+    assert deepseek_meta.append_original_video_link(out, yt) == out
+
+
+def test_generate_bilibili_meta_appends_youtube_link(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+
+    def fake_generate_sync(*, filename: str, subtitle_text: str):
+        return {
+            "title": "标题",
+            "desc": "简介正文",
+            "tag": ["配音"],
+            "tag_str": "配音",
+            "dynamic": "",
+            "raw": {},
+        }
+
+    monkeypatch.setattr(deepseek_meta, "_generate_sync", fake_generate_sync)
+    result = asyncio.run(
+        deepseek_meta.generate_bilibili_meta(
+            filename="demo.mp4",
+            subtitle_text="hello",
+            source_url="https://youtu.be/abcdefghijk",
+        )
+    )
+    assert "简介正文" in result["desc"]
+    assert "原视频：https://youtu.be/abcdefghijk" in result["desc"]
+
+
 def test_extract_json_handles_fences_and_raw_newlines():
     raw = (
         "```json\n"

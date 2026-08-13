@@ -118,6 +118,7 @@ export type Task = {
   audio_mode?: AudioMode
   tts_provider?: TtsProvider
   bilibili_tid?: number
+  bilibili_auto_publish?: boolean
   stages: TaskStage[]
 }
 
@@ -242,6 +243,7 @@ export type TaskSummary = {
   audio_mode?: AudioMode
   tts_provider?: TtsProvider
   bilibili_tid?: number
+  bilibili_auto_publish?: boolean
 }
 
 export type TaskListStatus = "all" | TaskStatus
@@ -398,6 +400,7 @@ export function createTask(
   audioMode: AudioMode = "keep_bgm",
   ttsProvider: TtsProvider = "voxcpm",
   bilibiliTid: number = 201,
+  bilibiliAutoPublish: boolean = true,
 ) {
   return request<Task>("/api/tasks", {
     method: "POST",
@@ -407,6 +410,7 @@ export function createTask(
       audio_mode: audioMode,
       tts_provider: ttsProvider,
       bilibili_tid: bilibiliTid,
+      bilibili_auto_publish: bilibiliAutoPublish,
     }),
   })
 }
@@ -417,6 +421,7 @@ export function createTasksBatch(
   audioMode: AudioMode = "keep_bgm",
   ttsProvider: TtsProvider = "voxcpm",
   bilibiliTid: number = 201,
+  bilibiliAutoPublish: boolean = true,
 ) {
   return request<TaskBatchResult>("/api/tasks/batch", {
     method: "POST",
@@ -426,6 +431,7 @@ export function createTasksBatch(
       audio_mode: audioMode,
       tts_provider: ttsProvider,
       bilibili_tid: bilibiliTid,
+      bilibili_auto_publish: bilibiliAutoPublish,
     }),
   })
 }
@@ -438,6 +444,7 @@ export async function uploadLocalTask(
   audioMode: AudioMode = "keep_bgm",
   ttsProvider: TtsProvider = "voxcpm",
   bilibiliTid: number = 201,
+  bilibiliAutoPublish: boolean = true,
 ) {
   const form = new FormData()
   form.append("direction", direction)
@@ -449,6 +456,7 @@ export async function uploadLocalTask(
   form.append("audio_mode", audioMode)
   form.append("tts_provider", ttsProvider)
   form.append("bilibili_tid", String(bilibiliTid))
+  form.append("bilibili_auto_publish", bilibiliAutoPublish ? "true" : "false")
 
   const options: RequestInit = {
     method: "POST",
@@ -481,6 +489,7 @@ export async function uploadLocalTasks(
   audioMode: AudioMode = "keep_bgm",
   ttsProvider: TtsProvider = "voxcpm",
   bilibiliTid: number = 201,
+  bilibiliAutoPublish: boolean = true,
 ): Promise<LocalUploadBatchResult> {
   const created: Task[] = []
   const errors: LocalUploadBatchError[] = []
@@ -496,6 +505,7 @@ export async function uploadLocalTasks(
         audioMode,
         ttsProvider,
         bilibiliTid,
+        bilibiliAutoPublish,
       )
       created.push(task)
     } catch (err) {

@@ -169,6 +169,7 @@ export default function Home() {
   const [audioMode, setAudioMode] = useState<AudioMode>("keep_bgm")
   const [ttsProvider, setTtsProvider] = useState<TtsProvider>("voxcpm")
   const [bilibiliTid, setBilibiliTid] = useState(DEFAULT_BILIBILI_TID)
+  const [bilibiliAutoPublish, setBilibiliAutoPublish] = useState(true)
   const [tasks, setTasks] = useState<TaskSummary[]>([])
   const [taskTotal, setTaskTotal] = useState(0)
   const [activeTaskCount, setActiveTaskCount] = useState<number | null>(null)
@@ -236,6 +237,11 @@ export default function Home() {
       })),
     [],
   )
+
+  const bilibiliAutoPublishOptions: { value: "true" | "false"; label: string }[] = [
+    { value: "true", label: t.home.bilibiliAutoPublishYes },
+    { value: "false", label: t.home.bilibiliAutoPublishNo },
+  ]
 
   const statusOptions: { value: TaskListStatus; label: string }[] = [
     { value: "all", label: t.home.allStatuses },
@@ -468,6 +474,7 @@ export default function Home() {
           audioMode,
           ttsProvider,
           bilibiliTid,
+          bilibiliAutoPublish,
         )
         const createdCount = result.created.length
         const failedCount = result.errors.length
@@ -502,7 +509,14 @@ export default function Home() {
         return
       }
 
-      const result = await createTasksBatch(urls, executionMode, audioMode, ttsProvider, bilibiliTid)
+      const result = await createTasksBatch(
+        urls,
+        executionMode,
+        audioMode,
+        ttsProvider,
+        bilibiliTid,
+        bilibiliAutoPublish,
+      )
       const createdCount = result.created.length
       const existingCount = result.existing.length
       const failedCount = result.errors.length
@@ -749,6 +763,30 @@ export default function Home() {
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">{t.home.bilibiliTidHelp}</p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="bilibili-auto-publish">{t.home.bilibiliAutoPublishLabel}</Label>
+                <Select
+                  value={bilibiliAutoPublish ? "true" : "false"}
+                  onValueChange={(value) => setBilibiliAutoPublish(value === "true")}
+                >
+                  <SelectTrigger id="bilibili-auto-publish" className="h-10">
+                    <span className="min-w-0 truncate text-left">
+                      {selectedLabel(
+                        bilibiliAutoPublishOptions,
+                        bilibiliAutoPublish ? "true" : "false",
+                      )}
+                    </span>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {bilibiliAutoPublishOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">{t.home.bilibiliAutoPublishHelp}</p>
               </div>
               <div className="flex items-center justify-between gap-3">
                 {activeTaskCount !== null && activeTaskCount > 0 ? (

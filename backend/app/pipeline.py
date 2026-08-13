@@ -157,13 +157,26 @@ class PipelineRunner:
     def log(self, message: str) -> None:
         _write_log(self.task_id, message)
 
-    def _export_final_video(self, final_video: Path) -> None:
+    def _auto_publish_bilibili(self, task: dict | None = None) -> bool:
+        current = task or database.get_task(self.task_id) or {}
+        try:
+            return database.normalize_bilibili_auto_publish(current.get("bilibili_auto_publish"))
+        except ValueError:
+            return database.DEFAULT_BILIBILI_AUTO_PUBLISH
+
+    def _export_final_video(self, final_video: Path, *, bilibili_meta: Path | None = None) -> None:
+        """Export only when auto Bilibili publish is disabled."""
         from .adapters.export_video import export_final_video
+
+        task = database.get_task(self.task_id) or {}
+        if self._auto_publish_bilibili(task):
+            self.log("Skipped output-dir export because Bilibili auto-publish is enabled")
+            return
 
         output_dir = database.get_output_settings().get("output_dir", "")
         if not str(output_dir or "").strip():
+            self.log("Skipped output-dir export: OUTPUT_DIR / settings.output_dir is empty")
             return
-        task = database.get_task(self.task_id) or {}
         try:
             exported = export_final_video(
                 final_video,
@@ -171,6 +184,7 @@ class PipelineRunner:
                 title=task.get("title"),
                 output_dir=output_dir,
                 session=self.artifacts.session,
+                bilibili_meta=bilibili_meta or self.artifacts.bilibili_meta,
             )
         except Exception as exc:
             self.log(f"Failed to export final video to output directory: {exc}")
@@ -182,6 +196,10 @@ class PipelineRunner:
             self.log(f"Exported Chinese subtitles -> {exported.subtitle}")
         else:
             self.log("Chinese subtitles were not found; skipped subtitle export")
+        if exported.description is not None:
+            self.log(f"Exported Bilibili description -> {exported.description}")
+        else:
+            self.log("Bilibili description was not found; skipped description export")
 
     def _stage_bilibili_package(self, final_video: Path) -> None:
         from .bilibili.staging import prepare_task_staging
@@ -274,7 +292,12 @@ class PipelineRunner:
         self._stage_handlers[stage](database.get_task(self.task_id))
         if stage == "merge_video" and self.artifacts.final_video is not None:
             database.update_task(self.task_id, final_video_path=str(self.artifacts.final_video))
-            self._export_final_video(self.artifacts.final_video)
+        if stage == "bilibili_meta" and self.artifacts.final_video is not None:
+            # Export finished package only for non-publish tasks (video + srt + 简介).
+            self._export_final_video(
+                self.artifacts.final_video,
+                bilibili_meta=self.artifacts.bilibili_meta,
+            )
         database.update_stage(
             self.task_id,
             stage,
@@ -655,6 +678,7 @@ class PipelineRunner:
             generate_bilibili_meta(
                 filename=package.video.name,
                 subtitle_text=subtitle_text,
+                source_url=str(task.get("url") or ""),
             )
         )
         settings = load_settings()
@@ -686,6 +710,13 @@ class PipelineRunner:
 
         from .bilibili import auth
         from .bilibili.uploader import UploadMeta, create_job, run_upload_job
+
+        if not self._auto_publish_bilibili(task):
+            self.stage_message(
+                "bilibili_publish",
+                "Skipped upload (task created with Bilibili auto-publish disabled)",
+            )
+            return
 
         session = _require(self.artifacts.session, "session")
         meta_path = self.artifacts.bilibili_meta
