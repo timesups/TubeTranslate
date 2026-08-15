@@ -121,11 +121,24 @@ def _ensure_cookie(source: SourceConfig) -> None:
     _bootstrap_bilibili_cookie(cookie_path)
 
 
-def _ydl_base(source: SourceConfig, proxy_port: str = "") -> dict[str, Any]:
+def _ydl_base(
+    source: SourceConfig,
+    proxy_port: str = "",
+    *,
+    player_clients: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    """Build shared yt-dlp options.
+
+    Do not force a YouTube player_client here by default: metadata extraction and
+    download each choose clients explicitly. Binding extract_info to web/web_safari
+    alone made format selection fail before the download retry loop could run.
+    """
     opts: dict[str, Any] = {
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        # Fail fast when YouTube is unreachable without the configured local proxy.
+        "socket_timeout": 30,
         "js_runtimes": {"node": {}},
         "http_headers": {
             "User-Agent": DEFAULT_USER_AGENT,
@@ -138,10 +151,11 @@ def _ydl_base(source: SourceConfig, proxy_port: str = "") -> dict[str, Any]:
         metadata = runtime_security.private_file_stat(cookie_path)
         if metadata and metadata.st_size > 0:
             opts["cookiefile"] = str(cookie_path)
-    if source.name == "youtube":
-        opts["extractor_args"] = {
-            "youtube": {"player_client": list(YOUTUBE_PLAYER_CLIENTS[0])},
-        }
+    if source.name == "youtube" and player_clients is not None:
+        if player_clients:
+            opts["extractor_args"] = {
+                "youtube": {"player_client": list(player_clients)},
+            }
     if not source.use_proxy:
         opts["proxy"] = ""
         return opts
@@ -149,6 +163,41 @@ def _ydl_base(source: SourceConfig, proxy_port: str = "") -> dict[str, Any]:
     if proxy:
         opts["proxy"] = proxy
     return opts
+
+
+def _extract_video_info(
+    url: str, source: SourceConfig, proxy_port: str = ""
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Fetch metadata only. Use unrestricted format so client fallbacks can succeed."""
+    if source.name != "youtube":
+        with yt_dlp.YoutubeDL(_ydl_base(source, proxy_port)) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return info, ydl.sanitize_info(info)
+
+    last_error: Exception | None = None
+    for clients in YOUTUBE_PLAYER_CLIENTS:
+        opts = {
+            **_ydl_base(source, proxy_port, player_clients=clients),
+            # Metadata must not require >=720p; that filter belongs to the download stage.
+            "format": "best",
+            "check_formats": False,
+            "ignore_no_formats_error": True,
+        }
+        label = ",".join(clients) if clients else "default"
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if not info:
+                    raise RuntimeError("yt-dlp returned empty video metadata")
+                return info, ydl.sanitize_info(info)
+        except Exception as exc:
+            last_error = exc
+            log.warning("extract_info failed clients=%s: %s", label, exc)
+            if _is_retryable_download_error(exc):
+                continue
+            raise _decorate_download_error(exc) from exc
+    assert last_error is not None
+    raise _decorate_download_error(last_error) from last_error
 
 
 def _session_path(workfolder: Path, info: dict[str, Any]) -> Path:
@@ -295,7 +344,7 @@ def _download_once(
         if skip_client_key is not None and client_key == skip_client_key:
             continue
         download_opts = {
-            **_ydl_base(source, proxy_port),
+            **_ydl_base(source, proxy_port, player_clients=client_key or None),
             "format": format_selector,
             "merge_output_format": "mp4",
             "outtmpl": str(video_file),
@@ -309,7 +358,7 @@ def _download_once(
         if extractor_args is not None:
             download_opts["extractor_args"] = extractor_args
         elif "extractor_args" in download_opts:
-            # Empty client tuple = use yt-dlp defaults instead of the base override.
+            # Empty client tuple = use yt-dlp defaults instead of a forced client.
             download_opts.pop("extractor_args", None)
         try:
             with yt_dlp.YoutubeDL(download_opts) as ydl:
@@ -379,9 +428,7 @@ def download_video(
     canonical_url = validated.url
     video_id = validated.video_id
     _ensure_cookie(source)
-    info_opts = _ydl_base(source, proxy_port)
-    with yt_dlp.YoutubeDL(info_opts) as ydl:
-        info = ydl.extract_info(canonical_url, download=False)
+    info, sanitized = _extract_video_info(canonical_url, source, proxy_port)
 
     if str(info.get("id", video_id)) != video_id:
         raise ValueError("The resolved video id does not match the submitted URL.")
@@ -394,7 +441,7 @@ def download_video(
 
     video_file = media_dir / "video_source.mp4"
     metadata_file = metadata_dir / "ytdlp_info.json"
-    metadata_file.write_text(json.dumps(ydl.sanitize_info(info), ensure_ascii=False, indent=2), encoding="utf-8")
+    metadata_file.write_text(json.dumps(sanitized, ensure_ascii=False, indent=2), encoding="utf-8")
 
     cover = download_original_cover(info, media_dir, source, proxy_port)
     if cover is None:

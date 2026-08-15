@@ -374,11 +374,75 @@ def test_download_accepts_720p_or_higher(monkeypatch, tmp_path):
     assert (session / "media" / "video_source.mp4").read_bytes() == b"fake-720p"
 
 
-def test_ydl_base_sets_youtube_player_clients(tmp_path):
+def test_ydl_base_does_not_force_youtube_player_clients_by_default(tmp_path):
     options = ytdlp._ydl_base(_youtube_source(), "")
+    assert "extractor_args" not in options
+
+
+def test_ydl_base_sets_youtube_player_clients_when_requested(tmp_path):
+    options = ytdlp._ydl_base(
+        _youtube_source(),
+        "",
+        player_clients=ytdlp.YOUTUBE_PLAYER_CLIENTS[0],
+    )
     assert options["extractor_args"]["youtube"]["player_client"] == list(
         ytdlp.YOUTUBE_PLAYER_CLIENTS[0]
     )
+
+
+def test_extract_info_falls_back_to_next_player_client(monkeypatch, tmp_path):
+    seen: list[list[str]] = []
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def extract_info(self, url, *, download):
+            clients = list(
+                self.options.get("extractor_args", {})
+                .get("youtube", {})
+                .get("player_client")
+                or []
+            )
+            seen.append(clients)
+            assert download is False
+            assert self.options.get("format") == "best"
+            if clients == list(ytdlp.YOUTUBE_PLAYER_CLIENTS[0]):
+                raise ytdlp.yt_dlp.utils.DownloadError(
+                    "ERROR: Requested format is not available. Use --list-formats"
+                )
+            return {
+                "id": "abcdefghijk",
+                "uploader": "tester",
+                "title": "meta-ok",
+                "webpage_url": url,
+            }
+
+        def sanitize_info(self, info):
+            return info
+
+        def download(self, urls):
+            Path(self.options["outtmpl"]).write_bytes(b"ok")
+
+    monkeypatch.setattr(ytdlp.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+    _patch_cover(monkeypatch)
+    _patch_min_resolution(monkeypatch)
+
+    session, info = ytdlp.download_video(
+        "https://www.youtube.com/watch?v=abcdefghijk",
+        tmp_path,
+        _youtube_source(),
+    )
+    assert info["title"] == "meta-ok"
+    assert (session / "media" / "video_source.mp4").read_bytes() == b"ok"
+    assert seen[0] == list(ytdlp.YOUTUBE_PLAYER_CLIENTS[0])
+    assert any(clients == list(ytdlp.YOUTUBE_PLAYER_CLIENTS[1]) for clients in seen)
 
 
 def test_pick_thumbnail_url_prefers_largest():

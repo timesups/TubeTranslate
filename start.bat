@@ -63,7 +63,9 @@ echo   API: http://localhost:%API_PORT%
 echo   Web: http://localhost:%WEB_PORT%
 echo.
 
-start "YouDub API" cmd /k ""%UVICORN%" backend.app.main:app --reload --host %API_HOST% --port %API_PORT%"
+rem Only watch backend/ for reload. Watching the whole repo restarts the API when
+rem yt-dlp writes into workfolder/, which aborts downloads in a restart loop.
+start "YouDub API" cmd /k ""%UVICORN%" backend.app.main:app --reload --reload-dir backend --host %API_HOST% --port %API_PORT%"
 start "YouDub Web" cmd /k "npm --prefix apps\web run dev -- --hostname %WEB_HOST% --port %WEB_PORT%"
 
 timeout /t 2 /nobreak >nul
