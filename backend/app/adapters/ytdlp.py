@@ -21,19 +21,22 @@ log = logging.getLogger(__name__)
 
 
 FORMAT_CANDIDATES = (
-    # Prefer muxed/progressive fallbacks: ios/tv clients often lack separate A/V streams.
-    "best[height<=1080][ext=mp4]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best",
-    "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
-    "bestvideo*+bestaudio/best",
-    "bv*+ba/b",
-    "best",
+    # Minimum 720p; prefer 1080p+ when available. Never fall back to unrestricted "best"
+    # (that previously accepted ios progressive 360p and stopped early).
+    "bestvideo[height>=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height>=720][ext=mp4]+bestaudio[ext=m4a]/best[height>=720][ext=mp4]",
+    "bestvideo[height>=720]+bestaudio/best[height>=720]",
+    "bestvideo*[height>=720]+bestaudio/best[height>=720]",
+    "bv*[height>=720]+ba/b[height>=720]",
 )
 
-# Prefer clients that still return downloadable URLs; end with yt-dlp defaults.
+MIN_VIDEO_HEIGHT = 720
+DOWNLOAD_ATTEMPTS = 5
+
+# Prefer clients more likely to expose >=720p DASH; ios/tv last (often progressive-only).
 YOUTUBE_PLAYER_CLIENTS = (
+    ("web", "web_safari"),
+    ("tv_embedded", "mweb"),
     ("ios", "tv", "android_vr"),
-    ("tv_embedded", "mweb", "web_safari"),
-    ("web",),
     (),  # empty => do not force player_client; use yt-dlp defaults
 )
 
@@ -46,17 +49,44 @@ YOUTUBE_403_HINT = (
     "Upload a YouTube cookie in Settings, then retry this task from the download stage."
 )
 YOUTUBE_FORMAT_HINT = (
-    "YouTube did not expose a matching downloadable format for the selected clients. "
+    f"YouTube did not provide a downloadable format at {MIN_VIDEO_HEIGHT}p or higher. "
     "Upload a YouTube cookie in Settings (or update yt-dlp), then retry from the download stage."
+)
+YOUTUBE_RESOLUTION_HINT = (
+    f"Downloaded video is below the minimum {MIN_VIDEO_HEIGHT}p requirement "
+    f"after {DOWNLOAD_ATTEMPTS} attempts."
 )
 
 
 def _decorate_download_error(exc: Exception) -> Exception:
     if _is_http_forbidden(exc):
         return RuntimeError(f"{YOUTUBE_403_HINT} Original error: {exc}")
-    if _is_format_unavailable(exc):
+    if _is_format_unavailable(exc) or "no video formats" in re.sub(
+        r"\x1b\[[0-9;]*m", "", str(exc)
+    ).lower():
         return RuntimeError(f"{YOUTUBE_FORMAT_HINT} Original error: {exc}")
+    if "below the minimum" in str(exc).lower() or "minimum required" in str(exc).lower():
+        return RuntimeError(f"{YOUTUBE_RESOLUTION_HINT} Original error: {exc}")
     return exc
+
+
+def _probe_video_height(video_file: Path) -> int | None:
+    from .ffmpeg import probe_video_size
+
+    size = probe_video_size(video_file)
+    if size is None:
+        return None
+    return int(size[1])
+
+
+def _ensure_min_resolution(video_file: Path, *, min_height: int = MIN_VIDEO_HEIGHT) -> None:
+    height = _probe_video_height(video_file)
+    if height is None:
+        raise RuntimeError(f"Could not probe video resolution after download: {video_file}")
+    if height < min_height:
+        raise RuntimeError(
+            f"Downloaded video is {height}p; minimum required is {min_height}p"
+        )
 
 
 def _bootstrap_bilibili_cookie(cookie_path: Path) -> None:
@@ -255,7 +285,7 @@ def _download_attempts(source: SourceConfig) -> list[tuple[str, dict[str, Any] |
     return attempts
 
 
-def _download_with_format_candidates(
+def _download_once(
     url: str, video_file: Path, source: SourceConfig, proxy_port: str
 ) -> None:
     last_error: Exception | None = None
@@ -285,6 +315,7 @@ def _download_with_format_candidates(
             with yt_dlp.YoutubeDL(download_opts) as ydl:
                 ydl.download([url])
             if video_file.exists() and video_file.stat().st_size > 0:
+                _ensure_min_resolution(video_file)
                 return
             last_error = RuntimeError("yt-dlp finished without producing media/video_source.mp4")
             _remove_partial_outputs(video_file)
@@ -306,11 +337,37 @@ def _download_with_format_candidates(
                 skip_client_key = client_key
                 continue
             skip_client_key = None
-            if _is_retryable_download_error(exc):
+            if _is_retryable_download_error(exc) or "minimum required" in str(exc).lower():
                 continue
             raise _decorate_download_error(exc) from exc
     if last_error:
         raise _decorate_download_error(last_error) from last_error
+    raise RuntimeError("yt-dlp finished without producing media/video_source.mp4")
+
+
+def _download_with_format_candidates(
+    url: str, video_file: Path, source: SourceConfig, proxy_port: str
+) -> None:
+    last_error: Exception | None = None
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        try:
+            _download_once(url, video_file, source, proxy_port)
+            return
+        except Exception as exc:
+            last_error = exc
+            _remove_partial_outputs(video_file)
+            log.warning(
+                "download attempt %d/%d failed (min %dp): %s",
+                attempt,
+                DOWNLOAD_ATTEMPTS,
+                MIN_VIDEO_HEIGHT,
+                exc,
+            )
+            if attempt >= DOWNLOAD_ATTEMPTS:
+                break
+            time.sleep(min(2 ** (attempt - 1), 8))
+    assert last_error is not None
+    raise _decorate_download_error(last_error) from last_error
 
 
 def download_video(

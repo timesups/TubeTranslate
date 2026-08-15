@@ -751,28 +751,6 @@ export default function Home() {
                 <p className="text-xs text-muted-foreground">{t.home.ttsProviderHelp}</p>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="bilibili-tid">{t.home.bilibiliTidLabel}</Label>
-                <Select
-                  value={String(bilibiliTid)}
-                  onValueChange={(value) => setBilibiliTid(Number(value || DEFAULT_BILIBILI_TID))}
-                >
-                  <SelectTrigger id="bilibili-tid" className="h-10">
-                    <span className="min-w-0 truncate text-left">
-                      {selectedLabel(bilibiliPartitionOptions, String(bilibiliTid)) ||
-                        t.home.bilibiliTidDefault}
-                    </span>
-                  </SelectTrigger>
-                  <SelectContent>
-                    {bilibiliPartitionOptions.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">{t.home.bilibiliTidHelp}</p>
-              </div>
-              <div className="space-y-2">
                 <Label htmlFor="bilibili-auto-publish">{t.home.bilibiliAutoPublishLabel}</Label>
                 <Select
                   value={bilibiliAutoPublish ? "true" : "false"}
@@ -799,6 +777,36 @@ export default function Home() {
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">{t.home.bilibiliAutoPublishHelp}</p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="bilibili-tid">{t.home.bilibiliTidLabel}</Label>
+                <Select
+                  value={String(bilibiliTid)}
+                  onValueChange={(value) => {
+                    if (!bilibiliAutoPublish) return
+                    setBilibiliTid(Number(value || DEFAULT_BILIBILI_TID))
+                  }}
+                  disabled={!bilibiliAutoPublish}
+                >
+                  <SelectTrigger id="bilibili-tid" className="h-10">
+                    <span className="min-w-0 truncate text-left">
+                      {selectedLabel(bilibiliPartitionOptions, String(bilibiliTid)) ||
+                        t.home.bilibiliTidDefault}
+                    </span>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {bilibiliPartitionOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {bilibiliAutoPublish
+                    ? t.home.bilibiliTidHelp
+                    : t.home.bilibiliTidLocked}
+                </p>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="bilibili-generate-meta">{t.home.bilibiliGenerateMetaLabel}</Label>

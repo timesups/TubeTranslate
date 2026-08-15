@@ -59,10 +59,12 @@ def test_ytdlp_enables_node_js_runtime(tmp_path):
     assert options["js_runtimes"] == {"node": {}}
 
 
-def test_ytdlp_format_candidates_prefer_progressive_fallback():
-    assert "best[height<=1080]" in ytdlp.FORMAT_CANDIDATES[0]
-    assert ytdlp.FORMAT_CANDIDATES[-1] == "best"
+def test_ytdlp_format_candidates_require_min_720p():
+    assert all("height>=720" in item or "height>=1080" in item for item in ytdlp.FORMAT_CANDIDATES)
+    assert "best" not in ytdlp.FORMAT_CANDIDATES  # bare best would accept 360p
     assert () in ytdlp.YOUTUBE_PLAYER_CLIENTS
+    assert ytdlp.MIN_VIDEO_HEIGHT == 720
+    assert ytdlp.DOWNLOAD_ATTEMPTS == 5
 
 
 def test_is_format_unavailable_strips_ansi():
@@ -82,6 +84,11 @@ def _youtube_source() -> SourceConfig:
         asr_language="en",
         target_language="zh",
     )
+
+
+def _patch_min_resolution(monkeypatch):
+    monkeypatch.setattr(ytdlp, "_ensure_min_resolution", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ytdlp.time, "sleep", lambda *_args, **_kwargs: None)
 
 
 def test_download_video_passes_only_the_canonical_url_to_both_ytdlp_sinks(
@@ -118,18 +125,9 @@ def test_download_video_passes_only_the_canonical_url_to_both_ytdlp_sinks(
             downloaded_urls.extend(urls)
             Path(self.options["outtmpl"]).write_bytes(b"video")
 
-    class FakeResponse:
-        content = b"\xff\xd8\xffcover"
-        def raise_for_status(self):
-            return None
-
     monkeypatch.setattr(ytdlp.yt_dlp, "YoutubeDL", FakeYoutubeDL)
-    monkeypatch.setattr(ytdlp.requests, "get", lambda *args, **kwargs: FakeResponse())
-    monkeypatch.setattr(
-        ytdlp,
-        "_save_cover_jpeg",
-        lambda image_bytes, dest: dest.write_bytes(image_bytes),
-    )
+    _patch_cover(monkeypatch)
+    _patch_min_resolution(monkeypatch)
 
     session, _ = ytdlp.download_video(
         "HTTPS://WWW.YOUTUBE.COM:443/watch?v=abcdefghijk",
@@ -188,6 +186,7 @@ def test_download_video_does_not_reuse_leftover_file(monkeypatch, tmp_path):
 
     monkeypatch.setattr(ytdlp.yt_dlp, "YoutubeDL", FakeYoutubeDL)
     _patch_cover(monkeypatch)
+    _patch_min_resolution(monkeypatch)
 
     session = tmp_path / "tester" / "leftover__abcdefghijk"
     leftover = session / "media" / "video_source.mp4"
@@ -231,6 +230,7 @@ def test_download_video_deletes_partial_and_raises_on_403(monkeypatch, tmp_path)
 
     monkeypatch.setattr(ytdlp.yt_dlp, "YoutubeDL", FakeYoutubeDL)
     _patch_cover(monkeypatch)
+    _patch_min_resolution(monkeypatch)
 
     with pytest.raises(RuntimeError, match="YouTube returned HTTP 403"):
         ytdlp.download_video(
@@ -277,6 +277,7 @@ def test_download_retries_403_with_next_player_client(monkeypatch, tmp_path):
 
     monkeypatch.setattr(ytdlp.yt_dlp, "YoutubeDL", FakeYoutubeDL)
     _patch_cover(monkeypatch)
+    _patch_min_resolution(monkeypatch)
 
     session, _ = ytdlp.download_video(
         "https://www.youtube.com/watch?v=abcdefghijk",
@@ -286,6 +287,91 @@ def test_download_retries_403_with_next_player_client(monkeypatch, tmp_path):
     assert (session / "media" / "video_source.mp4").read_bytes() == b"ok"
     assert seen_clients[0] == list(ytdlp.YOUTUBE_PLAYER_CLIENTS[0])
     assert seen_clients[-1] == list(ytdlp.YOUTUBE_PLAYER_CLIENTS[1])
+
+
+def test_download_rejects_below_720p_and_retries_then_fails(monkeypatch, tmp_path):
+    attempts = {"count": 0}
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def extract_info(self, url, *, download):
+            return {
+                "id": "abcdefghijk",
+                "uploader": "tester",
+                "title": "lowres",
+                "webpage_url": url,
+                "thumbnail": "https://i.ytimg.com/vi/abcdefghijk/maxresdefault.jpg",
+            }
+
+        def sanitize_info(self, info):
+            return info
+
+        def download(self, urls):
+            attempts["count"] += 1
+            Path(self.options["outtmpl"]).write_bytes(b"fake-360p")
+
+    monkeypatch.setattr(ytdlp.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+    _patch_cover(monkeypatch)
+    monkeypatch.setattr(ytdlp, "_probe_video_height", lambda *_args, **_kwargs: 360)
+    monkeypatch.setattr(ytdlp.time, "sleep", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(RuntimeError, match="minimum 720p"):
+        ytdlp.download_video(
+            "https://www.youtube.com/watch?v=abcdefghijk",
+            tmp_path,
+            _youtube_source(),
+        )
+
+    # Each outer attempt tries multiple format/client candidates until resolution fails.
+    assert attempts["count"] >= ytdlp.DOWNLOAD_ATTEMPTS
+    leftover = tmp_path / "tester" / "lowres__abcdefghijk" / "media" / "video_source.mp4"
+    assert not leftover.exists()
+
+
+def test_download_accepts_720p_or_higher(monkeypatch, tmp_path):
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def extract_info(self, url, *, download):
+            return {
+                "id": "abcdefghijk",
+                "uploader": "tester",
+                "title": "hd720",
+                "webpage_url": url,
+                "thumbnail": "https://i.ytimg.com/vi/abcdefghijk/maxresdefault.jpg",
+            }
+
+        def sanitize_info(self, info):
+            return info
+
+        def download(self, urls):
+            Path(self.options["outtmpl"]).write_bytes(b"fake-720p")
+
+    monkeypatch.setattr(ytdlp.yt_dlp, "YoutubeDL", FakeYoutubeDL)
+    _patch_cover(monkeypatch)
+    monkeypatch.setattr(ytdlp, "_probe_video_height", lambda *_args, **_kwargs: 720)
+
+    session, _ = ytdlp.download_video(
+        "https://www.youtube.com/watch?v=abcdefghijk",
+        tmp_path,
+        _youtube_source(),
+    )
+    assert (session / "media" / "video_source.mp4").read_bytes() == b"fake-720p"
 
 
 def test_ydl_base_sets_youtube_player_clients(tmp_path):
