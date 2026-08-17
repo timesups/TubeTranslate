@@ -22,8 +22,8 @@ SUBTITLE_FONTS = {
 }
 
 SUBTITLE_FONT_SIZES = {
-    "zh": {"portrait": 12, "landscape": 24},
-    "en": {"portrait": 9, "landscape": 18},
+    "zh": {"portrait": 7, "landscape": 14},
+    "en": {"portrait": 6, "landscape": 11},
 }
 
 
@@ -31,10 +31,11 @@ def _subtitle_style(font: str, size: int, margin_v: int) -> str:
     return (
         f"FontName={font},"
         f"FontSize={size},"
-        "PrimaryColour=&H00FFFFFF,"
+        # ASS colour is &HAABBGGRR; opaque yellow.
+        "PrimaryColour=&H0000FFFF,"
         "OutlineColour=&H00000000,"
         "BorderStyle=1,"
-        "Outline=2,"
+        "Outline=1,"
         "Alignment=2,"
         f"MarginV={margin_v}"
     )
@@ -151,16 +152,20 @@ def _segment_times(item: dict) -> tuple[int, int]:
     return start, end
 
 
-def _dst_lang(translation: list[dict]) -> str:
-    for item in translation:
-        lang = item.get("dst_lang")
-        if lang:
-            return lang
-    return "zh"
-
-
 def _dst_text(item: dict) -> str:
-    return item.get("dst") or item.get("zh") or ""
+    return str(item.get("dst") or item.get("zh") or "").strip()
+
+
+def _src_text(item: dict) -> str:
+    return str(item.get("src") or "").strip()
+
+
+def _looks_mostly_cjk(text: str) -> bool:
+    letters = [ch for ch in text if not ch.isspace()]
+    if not letters:
+        return False
+    cjk = sum(1 for ch in letters if "\u4e00" <= ch <= "\u9fff")
+    return cjk / len(letters) >= 0.5
 
 
 def _chinese_text(item: dict) -> str:
@@ -171,7 +176,32 @@ def _chinese_text(item: dict) -> str:
     return str(item.get("zh") or "").strip()
 
 
-def _write_srt_lines(translation: list[dict], text_getter) -> list[str]:
+def _english_text(item: dict) -> str:
+    """English-only burn-in text for the final video (no Chinese)."""
+    src_lang = item.get("src_lang")
+    dst_lang = item.get("dst_lang")
+    if dst_lang == "en":
+        return _dst_text(item)
+    if src_lang == "en":
+        return _src_text(item)
+    if dst_lang == "zh":
+        return _src_text(item)
+    if src_lang == "zh":
+        return _dst_text(item)
+
+    src = _src_text(item)
+    dst = _dst_text(item)
+    if src and not _looks_mostly_cjk(src):
+        return src
+    if dst and not _looks_mostly_cjk(dst):
+        return dst
+    return ""
+
+
+def _write_srt_lines(
+    translation: list[dict],
+    text_getter,
+) -> list[str]:
     lines: list[str] = []
     idx = 1
     for item in translation:
@@ -190,11 +220,11 @@ def _write_srt_lines(translation: list[dict], text_getter) -> list[str]:
 
 
 def write_srt(translation_file: Path, session: Path) -> Path:
+    """Write English-only SRT used when burning subtitles into the final video."""
     data = json.loads(translation_file.read_text(encoding="utf-8"))
     translation = data["translation"]
-    dst_lang = _dst_lang(translation)
-    output_file = session / "metadata" / f"subtitles.{dst_lang}.srt"
-    lines = _write_srt_lines(translation, _dst_text)
+    output_file = session / "metadata" / "subtitles.en.srt"
+    lines = _write_srt_lines(translation, _english_text)
     output_file.write_text("\n".join(lines), encoding="utf-8")
     return output_file
 
@@ -252,7 +282,8 @@ def get_video_orientation(video_file: Path) -> str:
 
 def subtitle_style_for_orientation(orientation: str, font: str, lang: str = "zh") -> str:
     sizes = SUBTITLE_FONT_SIZES.get(lang, SUBTITLE_FONT_SIZES["zh"])
-    margin_v = 70 if orientation == "portrait" else 5
+    # Larger MarginV lifts bottom-aligned subtitles higher in the frame.
+    margin_v = 100 if orientation == "portrait" else 28
     return _subtitle_style(font, size=sizes[orientation], margin_v=margin_v)
 
 
@@ -263,10 +294,26 @@ def _subtitle_filter_path(subtitle_file: Path, session: Path) -> str:
         raise ValueError("Subtitle file must be inside the session directory.") from exc
 
 
+def _subtitle_contains_cjk(subtitle_file: Path) -> bool:
+    try:
+        text = subtitle_file.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+
 def subtitle_filter(video_file: Path, subtitle_file: Path, session: Path) -> str:
     lang = subtitle_file.stem.rsplit(".", 1)[-1]
-    font = SUBTITLE_FONTS.get(lang, "Arial")
-    style = subtitle_style_for_orientation(get_video_orientation(video_file), font, lang)
+    # Bilingual cues often mix CJK with Latin; prefer a CJK-capable font then.
+    if lang == "zh" or _subtitle_contains_cjk(subtitle_file):
+        font = SUBTITLE_FONTS["zh"]
+        style_lang = "zh"
+    else:
+        font = SUBTITLE_FONTS.get(lang, "Arial")
+        style_lang = lang if lang in SUBTITLE_FONT_SIZES else "en"
+    style = subtitle_style_for_orientation(
+        get_video_orientation(video_file), font, style_lang
+    )
     sub_path = _subtitle_filter_path(subtitle_file, session)
     return f"subtitles=filename='{sub_path}':force_style='{style}'"
 
@@ -321,7 +368,8 @@ def merge_video(
     session_dir = session.resolve()
     video_input = video_file.resolve()
     dubbing_input = dubbing_file.resolve()
-    subtitles = write_srt(timings_file, session)
+    burn_subtitles = get_video_orientation(video_input) != "portrait"
+    subtitles = write_srt(timings_file, session) if burn_subtitles else None
     mixed_audio = tmp_dir / "audio_mixed.m4a"
     mixed_audio_output = mixed_audio.resolve()
     final_video_output = final_video.resolve()
@@ -359,16 +407,20 @@ def merge_video(
             ],
             check=True,
         )
-    subprocess.run(
+    encode_cmd = [
+        ffmpeg_binary(),
+        "-y",
+        "-i",
+        str(video_input),
+        "-i",
+        str(mixed_audio_output),
+    ]
+    if burn_subtitles and subtitles is not None:
+        encode_cmd.extend(
+            ["-vf", subtitle_filter(video_input, subtitles, session_dir)]
+        )
+    encode_cmd.extend(
         [
-            ffmpeg_binary(),
-            "-y",
-            "-i",
-            str(video_input),
-            "-i",
-            str(mixed_audio_output),
-            "-vf",
-            subtitle_filter(video_input, subtitles, session_dir),
             "-map",
             "0:v:0",
             "-map",
@@ -385,7 +437,10 @@ def merge_video(
             "+faststart",
             "-shortest",
             str(final_video_output),
-        ],
+        ]
+    )
+    subprocess.run(
+        encode_cmd,
         check=True,
         cwd=session_dir,
     )

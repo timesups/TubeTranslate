@@ -29,18 +29,20 @@ def test_subtitle_styles_match_backend_orientation_rules():
     portrait = ffmpeg.subtitle_style_for_orientation("portrait", "Noto Sans CJK SC", "zh")
     landscape = ffmpeg.subtitle_style_for_orientation("landscape", "Noto Sans CJK SC", "zh")
 
-    assert "FontSize=12" in portrait
-    assert "MarginV=70" in portrait
-    assert "FontSize=24" in landscape
-    assert "MarginV=5" in landscape
+    assert "FontSize=7" in portrait
+    assert "MarginV=100" in portrait
+    assert "FontSize=14" in landscape
+    assert "MarginV=28" in landscape
+    assert "PrimaryColour=&H0000FFFF" in landscape
+    assert "Outline=1" in landscape
 
 
 def test_subtitle_styles_use_smaller_size_for_english():
     portrait_en = ffmpeg.subtitle_style_for_orientation("portrait", "Arial", "en")
     landscape_en = ffmpeg.subtitle_style_for_orientation("landscape", "Arial", "en")
 
-    assert "FontSize=9" in portrait_en
-    assert "FontSize=18" in landscape_en
+    assert "FontSize=6" in portrait_en
+    assert "FontSize=11" in landscape_en
 
 
 def test_subtitle_filter_picks_chinese_font_for_zh_srt(monkeypatch, tmp_path):
@@ -53,7 +55,7 @@ def test_subtitle_filter_picks_chinese_font_for_zh_srt(monkeypatch, tmp_path):
     assert "FontName=Arial" in ffmpeg.subtitle_filter(tmp_path / "v.mp4", sub_en, tmp_path)
 
 
-def test_merge_video_burns_portrait_subtitles(monkeypatch, tmp_path):
+def test_merge_video_skips_subtitles_for_portrait(monkeypatch, tmp_path):
     session = tmp_path / "session"
     metadata_dir = session / "metadata"
     metadata_dir.mkdir(parents=True)
@@ -67,7 +69,10 @@ def test_merge_video_burns_portrait_subtitles(monkeypatch, tmp_path):
                         "end_time": 1200,
                         "actual_start_time": 0,
                         "actual_end_time": 1200,
-                        "zh": "你好",
+                        "src": "Hello there",
+                        "dst": "你好",
+                        "src_lang": "en",
+                        "dst_lang": "zh",
                     }
                 ]
             }
@@ -75,11 +80,9 @@ def test_merge_video_burns_portrait_subtitles(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     commands: list[list[str]] = []
-    cwd_values: list[Path | None] = []
 
     def fake_run(cmd, capture_output=False, text=False, check=False, **kwargs):
         commands.append(cmd)
-        cwd_values.append(kwargs.get("cwd"))
         if Path(cmd[0]).name.startswith("ffprobe"):
             return subprocess.CompletedProcess(cmd, 0, stdout="720,1280\n", stderr="")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -95,14 +98,68 @@ def test_merge_video_burns_portrait_subtitles(monkeypatch, tmp_path):
     )
 
     assert final_video == session / "media" / "video_final.mp4"
-    assert len(commands) == 3
+    final_command = commands[-1]
+    assert "-vf" not in final_command
+    assert "subtitles=" not in " ".join(final_command)
+    assert not (session / "metadata" / "subtitles.en.srt").exists()
+
+
+def test_merge_video_burns_landscape_english_subtitles(monkeypatch, tmp_path):
+    session = tmp_path / "session"
+    metadata_dir = session / "metadata"
+    metadata_dir.mkdir(parents=True)
+    timings = metadata_dir / "timings.json"
+    timings.write_text(
+        json.dumps(
+            {
+                "translation": [
+                    {
+                        "start_time": 0,
+                        "end_time": 1200,
+                        "actual_start_time": 0,
+                        "actual_end_time": 1200,
+                        "src": "Hello there",
+                        "dst": "你好",
+                        "src_lang": "en",
+                        "dst_lang": "zh",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+    cwd_values: list[Path | None] = []
+
+    def fake_run(cmd, capture_output=False, text=False, check=False, **kwargs):
+        commands.append(cmd)
+        cwd_values.append(kwargs.get("cwd"))
+        if Path(cmd[0]).name.startswith("ffprobe"):
+            return subprocess.CompletedProcess(cmd, 0, stdout="1920,1080\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(ffmpeg.subprocess, "run", fake_run)
+
+    final_video = ffmpeg.merge_video(
+        tmp_path / "video.mp4",
+        tmp_path / "dubbing.wav",
+        tmp_path / "bgm.wav",
+        timings,
+        session,
+    )
+
+    assert final_video == session / "media" / "video_final.mp4"
     final_command = commands[-1]
     filter_arg = final_command[final_command.index("-vf") + 1]
-    assert filter_arg.startswith("subtitles=filename='metadata/subtitles.zh.srt'")
-    assert "FontSize=12" in filter_arg
-    assert "MarginV=70" in filter_arg
-    assert "-c:s" not in final_command
+    assert filter_arg.startswith("subtitles=filename='metadata/subtitles.en.srt'")
+    assert "FontSize=11" in filter_arg
+    assert "MarginV=28" in filter_arg
+    assert "PrimaryColour=&H0000FFFF" in filter_arg
+    assert "Outline=1" in filter_arg
     assert cwd_values[-1] == session.resolve()
+    burned = (session / "metadata" / "subtitles.en.srt").read_text(encoding="utf-8")
+    assert "Hello there" in burned
+    assert "你好" not in burned
 
 
 def test_merge_video_uses_absolute_media_paths_when_cwd_is_session(monkeypatch, tmp_path):
@@ -120,7 +177,10 @@ def test_merge_video_uses_absolute_media_paths_when_cwd_is_session(monkeypatch, 
                         "end_time": 1200,
                         "actual_start_time": 0,
                         "actual_end_time": 1200,
-                        "zh": "你好",
+                        "src": "Hello",
+                        "dst": "你好",
+                        "src_lang": "en",
+                        "dst_lang": "zh",
                     }
                 ]
             }
@@ -134,7 +194,8 @@ def test_merge_video_uses_absolute_media_paths_when_cwd_is_session(monkeypatch, 
         commands.append(cmd)
         cwd_values.append(kwargs.get("cwd"))
         if cmd[0] == "ffprobe":
-            return subprocess.CompletedProcess(cmd, 0, stdout="720,1280\n", stderr="")
+            # Landscape so subtitles path still exercises the encode command.
+            return subprocess.CompletedProcess(cmd, 0, stdout="1920,1080\n", stderr="")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(ffmpeg.subprocess, "run", fake_run)
@@ -147,10 +208,11 @@ def test_merge_video_uses_absolute_media_paths_when_cwd_is_session(monkeypatch, 
         session,
     )
 
-    mix_command = commands[0]
+    mix_command = next(cmd for cmd in commands if "-filter_complex" in cmd or (len(cmd) > 3 and cmd[-1].endswith("audio_mixed.m4a")))
     final_command = commands[-1]
     assert Path(mix_command[mix_command.index("-i") + 1]).is_absolute()
-    assert Path(mix_command[mix_command.index("-i", mix_command.index("-i") + 1) + 1]).is_absolute()
+    if "-filter_complex" in mix_command:
+        assert Path(mix_command[mix_command.index("-i", mix_command.index("-i") + 1) + 1]).is_absolute()
     assert Path(mix_command[-1]).is_absolute()
     assert Path(final_command[final_command.index("-i") + 1]).is_absolute()
     assert Path(final_command[final_command.index("-i", final_command.index("-i") + 1) + 1]).is_absolute()
@@ -180,7 +242,10 @@ def test_write_srt_splits_long_sentence_into_multiple_entries(tmp_path):
                         "end_time": 6000,
                         "actual_start_time": 0,
                         "actual_end_time": 6000,
-                        "zh": "我们今天讨论宇宙的边界，那是一个神秘话题；不过别担心，我会详细解释",
+                        "src": "Today we discuss the edge of the universe, a mysterious topic; but do not worry, I will explain in detail",
+                        "dst": "我们今天讨论宇宙的边界，那是一个神秘话题；不过别担心，我会详细解释",
+                        "src_lang": "en",
+                        "dst_lang": "zh",
                     }
                 ]
             }
@@ -189,9 +254,42 @@ def test_write_srt_splits_long_sentence_into_multiple_entries(tmp_path):
     )
     srt = ffmpeg.write_srt(timings, session)
     content = srt.read_text(encoding="utf-8")
+    assert srt.name == "subtitles.en.srt"
+    assert "宇宙" not in content
     blocks = [b for b in content.strip().split("\n\n") if b.strip()]
     assert len(blocks) >= 3
     assert all("-->" in b for b in blocks)
+
+
+def test_write_srt_burns_english_only(tmp_path):
+    session = tmp_path / "session"
+    metadata_dir = session / "metadata"
+    metadata_dir.mkdir(parents=True)
+    timings = metadata_dir / "timings.json"
+    timings.write_text(
+        json.dumps(
+            {
+                "translation": [
+                    {
+                        "start_time": 0,
+                        "end_time": 2000,
+                        "actual_start_time": 0,
+                        "actual_end_time": 2000,
+                        "src": "Hello world",
+                        "dst": "你好世界",
+                        "src_lang": "en",
+                        "dst_lang": "zh",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    srt = ffmpeg.write_srt(timings, session)
+    content = srt.read_text(encoding="utf-8")
+    assert "Hello world" in content
+    assert "你好世界" not in content
+    assert srt.name == "subtitles.en.srt"
 
 
 def test_probe_video_size_uses_configured_ffprobe(monkeypatch):
