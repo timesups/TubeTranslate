@@ -124,6 +124,41 @@ def merge_video_nvenc_preset() -> str:
     return value if value in allowed else "p4"
 
 
+def package_output_suffix() -> str:
+    return (os.getenv("PACKAGE_OUTPUT_SUFFIX") or "_译制").strip() or "_译制"
+
+
+def package_export_subtitle() -> bool:
+    raw = (os.getenv("PACKAGE_EXPORT_SUBTITLE") or "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def package_continue_on_error() -> bool:
+    raw = (os.getenv("PACKAGE_CONTINUE_ON_ERROR") or "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def package_allowed_roots() -> list[Path]:
+    raw = (os.getenv("PACKAGE_ALLOWED_ROOTS") or "").strip()
+    if not raw:
+        return []
+    roots: list[Path] = []
+    for entry in raw.split(";"):
+        cleaned = entry.strip().strip('"').strip("'")
+        if cleaned:
+            roots.append(Path(cleaned).expanduser().resolve())
+    return roots
+
+
+def package_max_items() -> int:
+    raw = (os.getenv("PACKAGE_MAX_ITEMS") or "100").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 100
+    return max(1, min(500, value))
+
+
 def _ffmpeg_bin_directories() -> list[Path]:
     """Resolve directories that contain FFmpeg shared DLLs (Windows TorchCodec)."""
     candidates: list[Path] = []

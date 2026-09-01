@@ -112,6 +112,9 @@ def init_db() -> None:
             );
             """
         )
+        from . import package_db
+
+        package_db.init_package_tables(conn)
         defaults = openai_defaults()
         for key, value in defaults.items():
             conn.execute(

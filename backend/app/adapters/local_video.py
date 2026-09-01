@@ -63,6 +63,11 @@ def _session_path(workfolder: Path, task_id: str, title: str) -> Path:
     return workfolder / "local" / f"{safe_title}__{task_id}"
 
 
+def package_item_session(workfolder: Path, package_id: str, item_id: str, title: str) -> Path:
+    safe_title = sanitize_text(title) or "video"
+    return workfolder / "packages" / package_id / "items" / f"{item_id}__{safe_title}"
+
+
 def _probe_media(path: Path) -> dict[str, object]:
     result = subprocess.run(
         [
@@ -112,6 +117,70 @@ def _probe_media(path: Path) -> dict[str, object]:
         "audio_codec": audio_codec,
         "duration": duration,
     }
+
+
+def _prepare_session_video(source_file: Path, session: Path, source: SourceConfig, info: dict) -> tuple[Path, dict]:
+    media_dir = session / "media"
+    metadata_dir = session / "metadata"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+
+    video_file = media_dir / "video_source.mp4"
+    metadata_file = metadata_dir / "local_info.json"
+    metadata_file.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    source_probe = _probe_media(source_file)
+    expected_duration = source_probe.get("duration")
+    expected = expected_duration if isinstance(expected_duration, (int, float)) else None
+    if _is_usable_output(video_file, expected):
+        from ..bilibili.staging import extract_cover_to_session
+
+        extract_cover_to_session(video_file, session)
+        return video_file, info
+    if video_file.exists():
+        video_file.unlink(missing_ok=True)
+
+    _transcode_to_mp4(
+        source_file,
+        video_file,
+        stream_copy=_can_stream_copy(source_probe),
+    )
+    if not _is_usable_output(video_file, expected):
+        if video_file.exists():
+            video_file.unlink(missing_ok=True)
+        raise RuntimeError("ffmpeg finished without producing a complete media/video_source.mp4")
+
+    from ..bilibili.staging import extract_cover_to_session
+
+    extract_cover_to_session(video_file, session)
+    return video_file, info
+
+
+def import_path_video(
+    source_file: Path,
+    workfolder: Path,
+    package_id: str,
+    item_id: str,
+    source: SourceConfig,
+    *,
+    title: str | None = None,
+) -> tuple[Path, dict]:
+    resolved = source_file.resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Package source video not found: {resolved}")
+    resolved_title = title or resolved.stem
+    session = package_item_session(workfolder, package_id, item_id, resolved_title)
+    info = {
+        "id": item_id,
+        "title": resolved_title,
+        "source": "local-file",
+        "package_id": package_id,
+        "original_path": str(resolved),
+        "asr_language": source.asr_language,
+        "target_language": source.target_language,
+    }
+    _prepare_session_video(resolved, session, source, info)
+    return session, info
 
 
 def _can_stream_copy(probe: dict[str, object]) -> bool:
@@ -203,12 +272,7 @@ def import_local_video(url: str, workfolder: Path, source: SourceConfig) -> tupl
     subtitle_file = uploaded_subtitle_file(workfolder, task_id)
     title = _title_from_url(url, source_file)
     session = _session_path(workfolder, task_id, title)
-    media_dir = session / "media"
-    metadata_dir = session / "metadata"
-    media_dir.mkdir(parents=True, exist_ok=True)
-    metadata_dir.mkdir(parents=True, exist_ok=True)
-
-    video_file = media_dir / "video_source.mp4"
+    video_file = session / "media" / "video_source.mp4"
     info = {
         "id": task_id,
         "title": title,
@@ -220,31 +284,5 @@ def import_local_video(url: str, workfolder: Path, source: SourceConfig) -> tupl
     }
     if subtitle_file:
         info["subtitle_path"] = str(subtitle_file)
-    metadata_file = metadata_dir / "local_info.json"
-    metadata_file.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    source_probe = _probe_media(source_file)
-    expected_duration = source_probe.get("duration")
-    expected = expected_duration if isinstance(expected_duration, (int, float)) else None
-    if _is_usable_output(video_file, expected):
-        from ..bilibili.staging import extract_cover_to_session
-
-        extract_cover_to_session(video_file, session)
-        return session, info
-    if video_file.exists():
-        video_file.unlink(missing_ok=True)
-
-    _transcode_to_mp4(
-        source_file,
-        video_file,
-        stream_copy=_can_stream_copy(source_probe),
-    )
-    if not _is_usable_output(video_file, expected):
-        if video_file.exists():
-            video_file.unlink(missing_ok=True)
-        raise RuntimeError("ffmpeg finished without producing a complete media/video_source.mp4")
-
-    from ..bilibili.staging import extract_cover_to_session
-
-    extract_cover_to_session(video_file, session)
+    _prepare_session_video(source_file, session, source, info)
     return session, info

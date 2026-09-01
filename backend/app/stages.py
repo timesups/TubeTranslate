@@ -25,3 +25,6 @@ STAGES: tuple[StageSpec, ...] = (
 
 
 STAGE_NAMES = tuple(stage.name for stage in STAGES)
+
+PACKAGE_STAGES: tuple[StageSpec, ...] = STAGES[:9]
+PACKAGE_STAGE_NAMES = tuple(stage.name for stage in PACKAGE_STAGES)

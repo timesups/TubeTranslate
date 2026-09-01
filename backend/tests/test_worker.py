@@ -42,7 +42,7 @@ def test_worker_isolates_runner_exception_and_processes_next_task(monkeypatch, t
         "https://www.youtube.com/watch?v=successtask",
         task_id="successtask",
     )
-    work_queue: queue.Queue[str] = queue.Queue()
+    work_queue: queue.Queue[tuple[str, str]] = queue.Queue()
     monkeypatch.setattr(worker, "_queue", work_queue)
 
     executed: list[str] = []
@@ -60,10 +60,13 @@ def test_worker_isolates_runner_exception_and_processes_next_task(monkeypatch, t
         )
         second_finished.set()
 
-    thread = threading.Thread(target=worker._loop, args=(runner,), daemon=True)
+    def run_package(_package_id: str) -> None:
+        raise AssertionError("package runner should not be invoked")
+
+    thread = threading.Thread(target=worker._loop, args=(runner, run_package), daemon=True)
     thread.start()
-    work_queue.put(failed_task)
-    work_queue.put(successful_task)
+    work_queue.put(("task", failed_task))
+    work_queue.put(("task", successful_task))
 
     assert second_finished.wait(timeout=2.0)
     queue_joined = threading.Event()
@@ -91,7 +94,7 @@ def test_worker_isolates_runner_exception_and_processes_next_task(monkeypatch, t
 
 
 def test_worker_continues_when_failure_reporter_also_raises(monkeypatch, caplog):
-    work_queue: queue.Queue[str] = queue.Queue()
+    work_queue: queue.Queue[tuple[str, str]] = queue.Queue()
     monkeypatch.setattr(worker, "_queue", work_queue)
 
     def fail_reporter(_task_id: str, _exc: Exception) -> None:
@@ -107,10 +110,13 @@ def test_worker_continues_when_failure_reporter_also_raises(monkeypatch, caplog)
             raise RuntimeError("runner exploded")
         second_finished.set()
 
-    thread = threading.Thread(target=worker._loop, args=(runner,), daemon=True)
+    def run_package(_package_id: str) -> None:
+        raise AssertionError("package runner should not be invoked")
+
+    thread = threading.Thread(target=worker._loop, args=(runner, run_package), daemon=True)
     thread.start()
-    work_queue.put("first")
-    work_queue.put("second")
+    work_queue.put(("task", "first"))
+    work_queue.put(("task", "second"))
 
     assert second_finished.wait(timeout=2.0)
     queue_joined = threading.Event()

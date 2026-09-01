@@ -14,6 +14,7 @@ BILIBILI_HOSTS = {"bilibili.com", "www.bilibili.com"}
 DEFAULT_HTTP_PORTS = {"http": 80, "https": 443}
 LOCAL_UPLOAD_SCHEME = "local"
 LOCAL_UPLOAD_HOST = "upload"
+LOCAL_FILE_HOST = "file"
 LOCAL_UPLOAD_DIRECTIONS = {"en-zh", "zh-en"}
 LOCAL_UPLOAD_TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -159,3 +160,32 @@ def is_local_en_to_zh_url(url: str) -> bool:
 
 def is_local_zh_to_en_url(url: str) -> bool:
     return is_local_upload_url(url) and local_upload_direction(url) == "zh-en"
+
+
+def local_file_item_id(url: str) -> str:
+    parsed = urlparse(url.strip())
+    if parsed.scheme != LOCAL_UPLOAD_SCHEME or parsed.netloc != LOCAL_FILE_HOST:
+        return ""
+    candidate = parsed.path.strip("/").split("/", maxsplit=1)[0]
+    if not LOCAL_UPLOAD_TASK_ID_RE.match(candidate):
+        return ""
+    return candidate
+
+
+def local_file_direction(url: str) -> str:
+    parsed = urlparse(url.strip())
+    if not local_file_item_id(url):
+        return ""
+    return parse_qs(parsed.query).get("direction", [""])[0]
+
+
+def is_local_file_url(url: str) -> bool:
+    return bool(local_file_item_id(url)) and local_file_direction(url) in LOCAL_UPLOAD_DIRECTIONS
+
+
+def is_local_file_en_to_zh_url(url: str) -> bool:
+    return is_local_file_url(url) and local_file_direction(url) == "en-zh"
+
+
+def is_local_file_zh_to_en_url(url: str) -> bool:
+    return is_local_file_url(url) and local_file_direction(url) == "zh-en"

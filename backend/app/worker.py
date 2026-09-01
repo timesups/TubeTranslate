@@ -1,4 +1,4 @@
-"""Single-thread FIFO worker that runs queued tasks one at a time."""
+"""Single-thread FIFO worker for standalone tasks and package jobs."""
 
 from __future__ import annotations
 
@@ -11,14 +11,18 @@ from typing import Callable
 from . import database, runtime_security
 
 
-_queue: "queue.Queue[str]" = queue.Queue()
+_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
 _thread: threading.Thread | None = None
 _lock = threading.Lock()
 logger = logging.getLogger(__name__)
 
 
 def enqueue(task_id: str) -> None:
-    _queue.put(task_id)
+    _queue.put(("task", task_id))
+
+
+def enqueue_package(package_id: str) -> None:
+    _queue.put(("package", package_id))
 
 
 def _append_failure_log(task_id: str, traceback_text: str) -> None:
@@ -72,32 +76,74 @@ def _record_runner_failure(task_id: str, exc: Exception) -> None:
         logger.exception("Failed to write runner exception log for task %s", task_id)
 
 
-def _loop(runner: Callable[[str], None]) -> None:
+def _record_package_failure(package_id: str, exc: Exception) -> None:
+    from . import package_db
+
+    error_message = str(exc).strip() or type(exc).__name__
+    traceback_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    try:
+        package_db.update_package(
+            package_id,
+            status="failed",
+            error_message=error_message,
+            completed_at=database.now_iso(),
+        )
+    except Exception:
+        logger.exception("Failed to mark package %s as failed", package_id)
+    try:
+        path = package_db.log_path(package_id)
+        timestamp = database.now_iso()
+        with runtime_security.open_private_append_text(path) as handle:
+            handle.write(f"[{timestamp}] Worker caught an unhandled runner exception\n")
+            for line in traceback_text.rstrip().splitlines():
+                handle.write(f"[{timestamp}] {line}\n")
+    except Exception:
+        logger.exception("Failed to write runner exception log for package %s", package_id)
+
+
+def _loop(run_task: Callable[[str], None], run_package: Callable[[str], None]) -> None:
     while True:
-        task_id = _queue.get()
+        kind, job_id = _queue.get()
         try:
-            runner(task_id)
+            if kind == "package":
+                run_package(job_id)
+            else:
+                run_task(job_id)
         except Exception as exc:
             logger.error(
-                "Unhandled worker runner exception for task %s",
-                task_id,
+                "Unhandled worker runner exception for %s %s",
+                kind,
+                job_id,
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
             try:
-                _record_runner_failure(task_id, exc)
+                if kind == "package":
+                    _record_package_failure(job_id, exc)
+                else:
+                    _record_runner_failure(job_id, exc)
             except Exception:
-                logger.exception("Failed to record runner exception for task %s", task_id)
+                logger.exception("Failed to record runner exception for %s %s", kind, job_id)
         finally:
             _queue.task_done()
 
 
-def start(runner: Callable[[str], None]) -> None:
+def start(run_task: Callable[[str], None], run_package: Callable[[str], None] | None = None) -> None:
     global _thread
+    package_runner = run_package
+    if package_runner is None:
+        from .package_pipeline import run_package as default_run_package
+
+        package_runner = default_run_package
     with _lock:
         if _thread is not None:
             return
-        _thread = threading.Thread(target=_loop, args=(runner,), daemon=True)
+        _thread = threading.Thread(target=_loop, args=(run_task, package_runner), daemon=True)
         _thread.start()
-    pending = [t for t in database.list_tasks() if t["status"] == "queued"]
-    for task in reversed(pending):
-        _queue.put(task["id"])
+    pending_tasks = [t for t in database.list_tasks() if t["status"] == "queued"]
+    for task in reversed(pending_tasks):
+        _queue.put(("task", task["id"]))
+    from . import package_db
+
+    pending_packages = [p for p in package_db.list_packages(limit=500) if p["status"] in ("queued", "partial")]
+    for package in reversed(pending_packages):
+        _queue.put(("package", package["id"]))

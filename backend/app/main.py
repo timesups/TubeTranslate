@@ -22,7 +22,9 @@ from .adapters.local_subtitles import parse_srt, uploaded_subtitle_dir
 from .adapters.local_video import remove_upload, uploaded_video_dir
 from .adapters.openai_client import validate_openai_base_url
 from .adapters.openai_translate import list_models as list_openai_models
-from .config import WORKFOLDER, YOUTUBE_COOKIE_PATH, ensure_runtime_dirs
+from .config import WORKFOLDER, YOUTUBE_COOKIE_PATH, ensure_runtime_dirs, package_output_suffix
+from .package_tasks import scan_source_dir, validate_source_dir
+from . import package_db
 from .pipeline import run_task
 from .runtime_checks import validate_runtime_device
 from .sanitize import sanitize_text
@@ -80,6 +82,28 @@ class TaskBatchCreate(BaseModel):
     bilibili_tid: int = 229
     bilibili_auto_publish: bool = True
     bilibili_generate_meta: bool = True
+
+
+class TaskPackageScan(BaseModel):
+    source_dir: str
+    glob: str | None = None
+    recursive: bool = False
+    output_suffix: str | None = None
+    skip_if_export_exists: bool = True
+
+
+class TaskPackageCreate(TaskPackageScan):
+    name: str = ""
+    direction: str = "en-zh"
+    execution_mode: str = "auto"
+    audio_mode: str = "replace"
+    tts_provider: str = "azure"
+    export_subtitle: bool = True
+    continue_on_error: bool = True
+
+
+class TaskPackageContinue(BaseModel):
+    execution_mode: str | None = None
 
 
 class TaskBatchDelete(BaseModel):
@@ -225,9 +249,14 @@ async def lifespan(app: FastAPI):
     database.delete_expired_auth_sessions(database.now_iso())
     database.backfill_titles_from_metadata()
     interrupted = database.reclaim_interrupted_tasks()
+    from . import package_db
+
+    interrupted_packages = package_db.reclaim_interrupted_packages()
     worker.start(run_task)
     for task_id in interrupted:
         worker.enqueue(task_id)
+    for package_id in interrupted_packages:
+        worker.enqueue_package(package_id)
     yield
 
 
@@ -588,6 +617,153 @@ def create_tasks_batch(payload: TaskBatchCreate) -> dict:
         "existing": existing,
         "errors": errors,
     }
+
+
+def _normalize_package_suffix(value: str | None) -> str:
+    suffix = (value if value is not None else package_output_suffix()).strip()
+    if not suffix:
+        raise HTTPException(status_code=422, detail="output_suffix must not be empty.")
+    if any(ch in suffix for ch in ('/', '\\', ':', '*', '?', '"', '<', '>', '|')):
+        raise HTTPException(status_code=422, detail="output_suffix contains invalid characters.")
+    return suffix
+
+
+@app.post("/api/task-packages/scan")
+def scan_task_package(payload: TaskPackageScan) -> dict:
+    try:
+        source_dir = validate_source_dir(payload.source_dir)
+        suffix = _normalize_package_suffix(payload.output_suffix)
+        files = scan_source_dir(
+            source_dir,
+            glob=payload.glob,
+            recursive=payload.recursive,
+            skip_if_export_exists=payload.skip_if_export_exists,
+            output_suffix=suffix,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "source_dir": str(source_dir),
+        "output_suffix": suffix,
+        "count": len(files),
+        "files": files,
+    }
+
+
+@app.post("/api/task-packages", status_code=201)
+def create_task_package(payload: TaskPackageCreate) -> dict:
+    try:
+        source_dir = validate_source_dir(payload.source_dir)
+        suffix = _normalize_package_suffix(payload.output_suffix)
+        direction = package_db.normalize_direction(payload.direction)
+        execution_mode = database.normalize_execution_mode(payload.execution_mode)
+        audio_mode = database.normalize_audio_mode(payload.audio_mode)
+        tts_provider = database.normalize_tts_provider(payload.tts_provider)
+        files = scan_source_dir(
+            source_dir,
+            glob=payload.glob,
+            recursive=payload.recursive,
+            skip_if_export_exists=payload.skip_if_export_exists,
+            output_suffix=suffix,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    runnable_items = [item for item in files if not item.get("will_skip")]
+    if not runnable_items and payload.skip_if_export_exists:
+        raise HTTPException(status_code=422, detail="All matching files already have exported outputs.")
+
+    _ensure_runtime_ready()
+    package_name = payload.name.strip() or source_dir.name
+    package_id = package_db.create_package(
+        name=package_name,
+        source_root=str(source_dir),
+        output_suffix=suffix,
+        direction=direction,
+        execution_mode=execution_mode,
+        audio_mode=audio_mode,
+        tts_provider=tts_provider,
+        export_subtitle=payload.export_subtitle,
+        continue_on_error=payload.continue_on_error,
+        skip_if_export_exists=payload.skip_if_export_exists,
+        items=[
+            {
+                "source_path": item["source_path"],
+                "relative_path": item.get("relative_path"),
+                "title": item.get("title"),
+            }
+            for item in files
+        ],
+    )
+    worker.enqueue_package(package_id)
+    package = package_db.get_package(package_id)
+    if package is None:
+        raise RuntimeError(f"Package {package_id} was not persisted.")
+    return package
+
+
+@app.get("/api/task-packages")
+def list_task_packages(limit: int = Query(50, ge=1, le=200)) -> dict:
+    packages = package_db.list_packages(limit=limit)
+    return {"packages": packages}
+
+
+@app.get("/api/task-packages/{package_id}")
+def get_task_package(package_id: str) -> dict:
+    package = package_db.get_package(package_id)
+    if package is None:
+        raise HTTPException(status_code=404, detail="Package not found.")
+    return package
+
+
+@app.post("/api/task-packages/{package_id}/continue")
+def continue_task_package(package_id: str, payload: TaskPackageContinue | None = None) -> dict:
+    package = package_db.get_package(package_id)
+    if package is None:
+        raise HTTPException(status_code=404, detail="Package not found.")
+    if package["status"] not in ("paused", "partial", "failed"):
+        raise HTTPException(status_code=409, detail="Package is not waiting to continue.")
+    if payload and payload.execution_mode is not None:
+        package_db.update_package(
+            package_id,
+            execution_mode=database.normalize_execution_mode(payload.execution_mode),
+        )
+    package_db.queue_package_for_continue(package_id)
+    worker.enqueue_package(package_id)
+    refreshed = package_db.get_package(package_id)
+    return refreshed or package
+
+
+@app.post("/api/task-packages/{package_id}/retry-failed")
+def retry_failed_task_package(package_id: str) -> dict:
+    package = package_db.get_package(package_id)
+    if package is None:
+        raise HTTPException(status_code=404, detail="Package not found.")
+    reset_count = package_db.reset_failed_package_items(package_id)
+    if reset_count <= 0:
+        raise HTTPException(status_code=409, detail="No failed items to retry.")
+    worker.enqueue_package(package_id)
+    refreshed = package_db.get_package(package_id)
+    return refreshed or package
+
+
+@app.delete("/api/task-packages/{package_id}")
+def delete_task_package(package_id: str) -> dict:
+    package = package_db.get_package(package_id)
+    if package is None:
+        raise HTTPException(status_code=404, detail="Package not found.")
+    if package["status"] in ("running", "queued"):
+        raise HTTPException(status_code=409, detail="Cannot delete a running or queued package.")
+    deleted = package_db.delete_package(package_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Package not found.")
+    session_root = WORKFOLDER / "packages" / package_id
+    if session_root.exists():
+        shutil.rmtree(session_root, ignore_errors=True)
+    log_file = package_db.log_path(package_id)
+    if log_file.exists():
+        log_file.unlink(missing_ok=True)
+    return {"deleted": True, "id": package_id}
 
 
 def _clean_upload_filename(filename: str | None) -> str:

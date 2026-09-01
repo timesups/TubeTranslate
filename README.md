@@ -142,6 +142,8 @@ OPENAI_MODEL=deepseek-v4-flash
 | `FFMPEG_PATH` / `FFPROBE_PATH` | FFmpeg 不在 PATH 时指定 |
 | `MERGE_VIDEO_ENCODER` | 合成视频编码：`auto`（默认）、`copy`、`x264`、`nvenc`、`qsv`、`amf`；`auto` 时竖屏优先 copy，横屏烧字幕优先 GPU |
 | `MERGE_VIDEO_CRF` / `MERGE_VIDEO_NVENC_PRESET` | 合成质量与 NVENC preset（默认 CRF/CQ 23、p4） |
+| `PACKAGE_ALLOWED_ROOTS` | 目录批处理允许扫描的根目录（分号分隔）；留空则不限制 |
+| `PACKAGE_OUTPUT_SUFFIX` | 批处理导出后缀（默认 `_译制`） |
 | `HTTP_PROXY` / `NO_PROXY` | yt-dlp / HTTPX 代理 |
 | `VOLCENGINE_TTS_*` / `AZURE_TTS_*` | 云端 TTS（也可在 Web 设置里配置） |
 

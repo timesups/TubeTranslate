@@ -407,6 +407,141 @@ export type TaskBatchResult = {
   errors: TaskBatchError[]
 }
 
+export type PackageStatus = TaskStatus | "partial"
+export type PackageItemStatus = StageStatus | "pending" | "queued" | "skipped"
+
+export type TaskPackageScanFile = {
+  source_path: string
+  relative_path: string
+  title: string
+  size_bytes: number
+  export_path: string
+  will_skip: boolean
+}
+
+export type TaskPackageScanResult = {
+  source_dir: string
+  output_suffix: string
+  count: number
+  files: TaskPackageScanFile[]
+}
+
+export type TaskPackageItemStage = {
+  item_id: string
+  name: string
+  label: string
+  status: StageStatus
+  progress: number | null
+  started_at: string | null
+  completed_at: string | null
+  last_message: string | null
+  error_message: string | null
+}
+
+export type TaskPackageItem = {
+  id: string
+  package_id: string
+  sort_index: number
+  source_path: string
+  relative_path: string | null
+  title: string | null
+  status: PackageItemStatus
+  current_stage: string | null
+  session_path: string | null
+  final_video_path: string | null
+  exported_video_path: string | null
+  exported_subtitle_path: string | null
+  error_message: string | null
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+  stages: TaskPackageItemStage[]
+}
+
+export type TaskPackage = {
+  id: string
+  name: string | null
+  status: PackageStatus
+  source_root: string
+  output_suffix: string
+  export_subtitle: boolean
+  direction: LocalDirection
+  execution_mode: ExecutionMode
+  audio_mode: AudioMode
+  tts_provider: TtsProvider
+  continue_on_error: boolean
+  skip_if_export_exists: boolean
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+  error_message: string | null
+  item_count?: number
+  succeeded_count?: number
+  failed_count?: number
+  items?: TaskPackageItem[]
+}
+
+export function scanTaskPackage(payload: {
+  source_dir: string
+  glob?: string
+  recursive?: boolean
+  output_suffix?: string
+  skip_if_export_exists?: boolean
+}) {
+  return request<TaskPackageScanResult>("/api/task-packages/scan", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  })
+}
+
+export function createTaskPackage(payload: {
+  source_dir: string
+  name?: string
+  glob?: string
+  recursive?: boolean
+  output_suffix?: string
+  direction?: LocalDirection
+  execution_mode?: ExecutionMode
+  audio_mode?: AudioMode
+  tts_provider?: TtsProvider
+  export_subtitle?: boolean
+  continue_on_error?: boolean
+  skip_if_export_exists?: boolean
+}) {
+  return request<TaskPackage>("/api/task-packages", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  })
+}
+
+export function listTaskPackages(limit = 20) {
+  return request<{ packages: TaskPackage[] }>(`/api/task-packages?limit=${limit}`)
+}
+
+export function getTaskPackage(id: string, signal?: AbortSignal) {
+  return request<TaskPackage>(`/api/task-packages/${id}`, { signal })
+}
+
+export function continueTaskPackage(id: string, executionMode?: ExecutionMode) {
+  return request<TaskPackage>(`/api/task-packages/${id}/continue`, {
+    method: "POST",
+    body: JSON.stringify(executionMode ? { execution_mode: executionMode } : {}),
+  })
+}
+
+export function retryFailedTaskPackage(id: string) {
+  return request<TaskPackage>(`/api/task-packages/${id}/retry-failed`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  })
+}
+
+export function deleteTaskPackage(id: string) {
+  return request<{ deleted: boolean; id: string }>(`/api/task-packages/${id}`, {
+    method: "DELETE",
+  })
+}
+
 export function parseVideoUrls(text: string): string[] {
   const parts = text
     .split(/[\n\r,;]+/)

@@ -17,11 +17,15 @@ import {
   TtsProvider,
   cleanupTasksBatch,
   createTasksBatch,
+  createTaskPackage,
   deleteTasksBatch,
   isAbortError,
+  listTaskPackages,
   listTasks,
   parseVideoUrls,
   resumeTasksBatch,
+  scanTaskPackage,
+  TaskPackage,
   uploadLocalTasks,
 } from "@/lib/api"
 import { BILIBILI_PARTITIONS, DEFAULT_BILIBILI_TID } from "@/lib/bilibili-partitions"
@@ -209,6 +213,16 @@ export default function Home() {
   const [batchRetryOpen, setBatchRetryOpen] = useState(false)
   const [batchRetrying, setBatchRetrying] = useState(false)
   const [batchRetryError, setBatchRetryError] = useState("")
+  const [packageSourceDir, setPackageSourceDir] = useState("")
+  const [packageSuffix, setPackageSuffix] = useState("_译制")
+  const [packageRecursive, setPackageRecursive] = useState(false)
+  const [packageScanCount, setPackageScanCount] = useState<number | null>(null)
+  const [packageScanSkipped, setPackageScanSkipped] = useState(0)
+  const [packageScanning, setPackageScanning] = useState(false)
+  const [packageSubmitting, setPackageSubmitting] = useState(false)
+  const [packageMessage, setPackageMessage] = useState("")
+  const [packageError, setPackageError] = useState("")
+  const [packages, setPackages] = useState<TaskPackage[]>([])
   const parsedUrls = parseVideoUrls(urlsText)
   const selectableTasks = useMemo(
     () => tasks.filter((task) => isDeletable(task.status)),
@@ -315,17 +329,21 @@ export default function Home() {
     const signal = context?.signal
     const isCurrent = context?.isCurrent ?? (() => true)
     try {
-      const result = await listTasks({
-        page: taskPage,
-        page_size: taskPageSize,
-        q: taskQuery,
-        status: taskStatus,
-        execution_mode: taskExecutionMode,
-        sort: taskSort,
-      }, signal)
+      const [result, packageResult] = await Promise.all([
+        listTasks({
+          page: taskPage,
+          page_size: taskPageSize,
+          q: taskQuery,
+          status: taskStatus,
+          execution_mode: taskExecutionMode,
+          sort: taskSort,
+        }, signal),
+        listTaskPackages(10),
+      ])
       if (isCurrent()) {
         setTaskListError("")
         applyTaskList(result)
+        setPackages(packageResult.packages)
       }
     } catch (err) {
       if (isCurrent() && !isAbortError(err)) {
@@ -507,6 +525,67 @@ export default function Home() {
     setError("")
     setMessage("")
     setLocalSubtitleFile(event.target.files?.[0] || null)
+  }
+
+  async function scanPackage() {
+    setPackageError("")
+    setPackageMessage("")
+    if (!packageSourceDir.trim()) return
+    setPackageScanning(true)
+    try {
+      const result = await scanTaskPackage({
+        source_dir: packageSourceDir.trim(),
+        recursive: packageRecursive,
+        output_suffix: packageSuffix.trim() || "_译制",
+        skip_if_export_exists: true,
+      })
+      const skipped = result.files.filter((file) => file.will_skip).length
+      setPackageScanCount(result.count)
+      setPackageScanSkipped(skipped)
+      setPackageMessage(
+        t.home.packageScanSummary
+          .replace("{count}", String(result.count))
+          .replace("{skipped}", String(skipped)),
+      )
+    } catch (err) {
+      setPackageError(err instanceof Error ? err.message : t.home.createError)
+    } finally {
+      setPackageScanning(false)
+    }
+  }
+
+  async function submitPackage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setPackageError("")
+    setPackageMessage("")
+    if (!packageSourceDir.trim()) return
+    setPackageSubmitting(true)
+    try {
+      const created = await createTaskPackage({
+        source_dir: packageSourceDir.trim(),
+        recursive: packageRecursive,
+        output_suffix: packageSuffix.trim() || "_译制",
+        direction: localDirection,
+        execution_mode: executionMode,
+        audio_mode: audioMode,
+        tts_provider: ttsProvider,
+        export_subtitle: true,
+        continue_on_error: true,
+        skip_if_export_exists: true,
+      })
+      setPackageMessage(
+        t.home.packageCreateSummary.replace("{count}", String(created.items?.length || 0)),
+      )
+      setPackageSourceDir("")
+      setPackageScanCount(null)
+      setPackageScanSkipped(0)
+      await pollTasks()
+      router.push(`/packages/${created.id}`)
+    } catch (err) {
+      setPackageError(err instanceof Error ? err.message : t.home.createError)
+    } finally {
+      setPackageSubmitting(false)
+    }
   }
 
   async function submitTask(event: FormEvent<HTMLFormElement>) {
@@ -913,6 +992,125 @@ export default function Home() {
             {error ? (
               <div className="mt-4 rounded-lg border border-red-500/30 bg-red-950/40 px-3 py-2 text-sm text-red-300">
                 {error}
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>{t.home.packageSectionTitle}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={submitPackage} className="space-y-4">
+              <p className="text-xs text-muted-foreground">{t.home.packageSourceDirHelp}</p>
+              <div className="space-y-2">
+                <Label htmlFor="package-source-dir">{t.home.packageSourceDirLabel}</Label>
+                <Input
+                  id="package-source-dir"
+                  value={packageSourceDir}
+                  onChange={(event) => {
+                    setPackageError("")
+                    setPackageMessage("")
+                    setPackageSourceDir(event.target.value)
+                  }}
+                  placeholder="D:/Videos/Course01"
+                  className="font-mono text-xs"
+                />
+              </div>
+              <div className="grid gap-3 sm:grid-cols-[1fr_180px]">
+                <div className="space-y-2">
+                  <Label htmlFor="package-suffix">{t.home.packageSuffixLabel}</Label>
+                  <Input
+                    id="package-suffix"
+                    value={packageSuffix}
+                    onChange={(event) => setPackageSuffix(event.target.value)}
+                    className="font-mono text-xs"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="package-direction">{t.home.localDirectionLabel}</Label>
+                  <Select
+                    value={localDirection}
+                    onValueChange={(value) => setLocalDirection(value as LocalDirection)}
+                  >
+                    <SelectTrigger id="package-direction" className="h-10">
+                      <span className="min-w-0 truncate text-left">
+                        {selectedLabel(localDirectionOptions, localDirection)}
+                      </span>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {localDirectionOptions.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={packageRecursive}
+                  onChange={(event) => setPackageRecursive(event.target.checked)}
+                />
+                {t.home.packageRecursive}
+              </label>
+              <p className="text-xs text-muted-foreground">{t.home.packageNoBilibiliNote}</p>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={!packageSourceDir.trim() || packageScanning}
+                  onClick={scanPackage}
+                >
+                  {packageScanning ? t.home.submitting : t.home.packageScan}
+                </Button>
+                <Button type="submit" disabled={!packageSourceDir.trim() || packageSubmitting}>
+                  {packageSubmitting ? t.home.submitting : t.home.packageCreate}
+                </Button>
+              </div>
+            </form>
+            {packageScanCount !== null ? (
+              <p className="mt-3 text-xs text-muted-foreground">
+                {t.home.packageScanSummary
+                  .replace("{count}", String(packageScanCount))
+                  .replace("{skipped}", String(packageScanSkipped))}
+              </p>
+            ) : null}
+            {packageMessage ? (
+              <div className="mt-4 rounded-lg border border-emerald-500/30 bg-emerald-950/40 px-3 py-2 text-sm text-emerald-300">
+                {packageMessage}
+              </div>
+            ) : null}
+            {packageError ? (
+              <div className="mt-4 rounded-lg border border-red-500/30 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+                {packageError}
+              </div>
+            ) : null}
+            {packages.length ? (
+              <div className="mt-6 space-y-2">
+                <p className="text-sm font-medium">{t.home.packageListTitle}</p>
+                {packages.map((entry) => (
+                  <div
+                    key={entry.id}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/60 px-3 py-2"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate font-medium">{entry.name || entry.source_root}</p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {(entry.succeeded_count ?? 0)}/{entry.item_count ?? 0} · {entry.source_root}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Badge className={statusBadgeClass(entry.status)}>{statusLabel(entry.status)}</Badge>
+                      <Button nativeButton={false} size="sm" variant="outline" render={<Link href={`/packages/${entry.id}`} />}>
+                        {t.home.packageView}
+                      </Button>
+                    </div>
+                  </div>
+                ))}
               </div>
             ) : null}
           </CardContent>
