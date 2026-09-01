@@ -703,6 +703,7 @@ class PipelineRunner:
                 filename=package.video.name,
                 subtitle_text=subtitle_text,
                 source_url=str(task.get("url") or ""),
+                original_title=str(task.get("title") or "").strip() or None,
             )
         )
         settings = load_settings()

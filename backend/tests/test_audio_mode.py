@@ -10,6 +10,39 @@ from backend.app.adapters import ffmpeg
 from backend.app.pipeline import PipelineRunner
 
 
+def _complete_ffmpeg_run(
+    cmd: list[str],
+    *,
+    ffprobe_stdout: str = "1920,1080\n",
+    encoders_stdout: str = "",
+    encode_returncode: int = 0,
+    encode_stderr: str = "",
+) -> subprocess.CompletedProcess[str]:
+    binary = Path(cmd[0]).name
+    if binary.startswith("ffprobe") or cmd[0] == "ffprobe":
+        return subprocess.CompletedProcess(cmd, 0, stdout=ffprobe_stdout, stderr="")
+    if "-encoders" in cmd:
+        return subprocess.CompletedProcess(cmd, 0, stdout=encoders_stdout, stderr="")
+    output = Path(cmd[-1])
+    if encode_returncode == 0 and output.suffix.lower() == ".mp4":
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"mp4")
+    return subprocess.CompletedProcess(
+        cmd,
+        encode_returncode,
+        stdout="",
+        stderr=encode_stderr,
+    )
+
+
+@pytest.fixture(autouse=True)
+def isolated_merge_video_encoders(monkeypatch):
+    if hasattr(ffmpeg._list_ffmpeg_video_encoders, "cache_clear"):
+        ffmpeg._list_ffmpeg_video_encoders.cache_clear()
+    monkeypatch.setattr(ffmpeg, "_list_ffmpeg_video_encoders", lambda: frozenset())
+    yield
+
+
 def configure_db(monkeypatch, tmp_path):
     monkeypatch.setattr(database, "DB_PATH", tmp_path / "test.sqlite")
     database.init_db()
@@ -74,9 +107,7 @@ def test_merge_video_replace_audio_skips_bgm_mix(monkeypatch, tmp_path):
 
     def fake_run(cmd, capture_output=False, text=False, check=False, **kwargs):
         commands.append(cmd)
-        if cmd[0] == "ffprobe":
-            return subprocess.CompletedProcess(cmd, 0, stdout="1280,720\n", stderr="")
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return _complete_ffmpeg_run(cmd, ffprobe_stdout="1280,720\n")
 
     monkeypatch.setattr(ffmpeg.subprocess, "run", fake_run)
     monkeypatch.setattr(ffmpeg, "get_video_orientation", lambda _: "landscape")

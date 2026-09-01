@@ -7,7 +7,7 @@ import shutil
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
@@ -93,6 +93,7 @@ class ContinueTaskRequest(BaseModel):
 MAX_BATCH_TASK_URLS = 50
 MAX_BATCH_DELETE_TASKS = 200
 MAX_BATCH_RESUME_TASKS = 200
+MAX_BATCH_CLEANUP_TASKS = 200
 
 
 class YouTubeCookieUpdate(BaseModel):
@@ -779,6 +780,122 @@ def _purge_task(task: dict) -> None:
     database.delete_task(task["id"])
 
 
+_CLEANUP_NAMED_SUFFIXES = (
+    ".mp4",
+    ".srt",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".bmp",
+    ".txt",
+    ".bilibili.txt",
+)
+
+
+def _unlink_quiet(path: Path) -> str | None:
+    try:
+        if not path.is_file():
+            return None
+        path.unlink(missing_ok=True)
+        return str(path)
+    except OSError as exc:
+        logger.warning("Skip removing %s: %s", path, exc)
+        return None
+
+
+def _remove_task_named_files(
+    directory: Path | None,
+    task_id: str,
+    *,
+    title: str | None = None,
+) -> list[str]:
+    """Delete export/staging files for a task by known names (no full directory listing)."""
+    from .adapters.export_video import export_basename
+
+    if directory is None or not directory.is_dir():
+        return []
+
+    stems = {export_basename(task_id=task_id, title=title), f"video__{task_id}", task_id}
+    removed: list[str] = []
+    seen: set[Path] = set()
+    for stem in stems:
+        for suffix in _CLEANUP_NAMED_SUFFIXES:
+            path = directory / f"{stem}{suffix}"
+            if path in seen:
+                continue
+            seen.add(path)
+            deleted = _unlink_quiet(path)
+            if deleted:
+                removed.append(deleted)
+    return removed
+
+
+def _cleanup_task_files(task: dict) -> dict[str, Any]:
+    """Remove on-disk artifacts for a task while keeping the DB record and log.
+
+    Intentionally does not touch the configured output/export directory.
+    """
+    from .bilibili.staging import staging_dir
+
+    task_id = task["id"]
+    title = task.get("title")
+    removed: list[str] = []
+    warnings: list[str] = []
+
+    session_path = task.get("session_path")
+    session_dir = Path(session_path) if session_path else None
+    if session_dir is not None:
+        try:
+            exists = session_dir.exists()
+        except OSError as exc:
+            warnings.append(f"session check failed: {exc}")
+            exists = False
+        if exists and _is_inside_workfolder(session_dir):
+            try:
+                shutil.rmtree(session_dir)
+                removed.append(str(session_dir))
+            except OSError as exc:
+                warnings.append(f"session remove failed: {exc}")
+                raise RuntimeError(
+                    f"无法删除会话目录（文件可能被占用）：{session_dir} ({exc})"
+                ) from exc
+
+    final_video_path = task.get("final_video_path")
+    if final_video_path:
+        final_video = Path(final_video_path)
+        if _is_inside_workfolder(final_video):
+            deleted = _unlink_quiet(final_video)
+            if deleted:
+                removed.append(deleted)
+
+    if is_local_upload_url(task.get("url") or ""):
+        upload_root = uploaded_video_dir(WORKFOLDER, task_id).parent
+        try:
+            upload_exists = upload_root.exists()
+        except OSError as exc:
+            warnings.append(f"upload check failed: {exc}")
+            upload_exists = False
+        if upload_exists and _is_inside_workfolder(upload_root):
+            try:
+                shutil.rmtree(upload_root)
+                removed.append(str(upload_root))
+            except OSError as exc:
+                warnings.append(f"upload remove failed: {exc}")
+                raise RuntimeError(
+                    f"无法删除本地上传目录（文件可能被占用）：{upload_root} ({exc})"
+                ) from exc
+
+    try:
+        removed.extend(_remove_task_named_files(staging_dir(), task_id, title=title))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to clean Bilibili staging files for task %s", task_id)
+        warnings.append(f"staging cleanup failed: {exc}")
+
+    database.update_task(task_id, session_path=None, final_video_path=None)
+    return {"id": task_id, "removed": removed, "warnings": warnings}
+
+
 @app.delete("/api/tasks/{task_id}", status_code=204)
 def delete_task(task_id: str) -> Response:
     task = database.get_task(task_id)
@@ -790,6 +907,23 @@ def delete_task(task_id: str) -> Response:
     if is_local_upload_url(task["url"]):
         remove_upload(WORKFOLDER, task["id"])
     return Response(status_code=204)
+
+
+@app.post("/api/tasks/{task_id}/cleanup-files")
+def cleanup_task_files(task_id: str) -> dict:
+    task = database.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    if task["status"] == "running":
+        raise HTTPException(status_code=409, detail="Cannot clean up files for a running task.")
+    try:
+        summary = _cleanup_task_files(task)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    refreshed = database.get_task(task_id)
+    if not refreshed:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    return {**refreshed, "cleanup": summary}
 
 
 @app.post("/api/tasks/batch-delete")
@@ -829,6 +963,46 @@ def batch_delete_tasks(payload: TaskBatchDelete) -> dict:
 
     return {
         "deleted": deleted,
+        "skipped": skipped,
+        "missing": missing,
+        "failed": failed,
+    }
+
+
+@app.post("/api/tasks/batch-cleanup-files")
+def batch_cleanup_task_files(payload: TaskBatchDelete) -> dict:
+    raw_ids = [str(task_id).strip() for task_id in payload.task_ids if str(task_id).strip()]
+    if not raw_ids:
+        raise HTTPException(status_code=422, detail="task_ids must not be empty.")
+    if len(raw_ids) > MAX_BATCH_CLEANUP_TASKS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"At most {MAX_BATCH_CLEANUP_TASKS} tasks can be cleaned at once.",
+        )
+
+    task_ids = list(dict.fromkeys(raw_ids))
+    cleaned: list[str] = []
+    skipped: list[dict[str, str]] = []
+    missing: list[str] = []
+    failed: list[dict[str, str]] = []
+
+    for task_id in task_ids:
+        task = database.get_task(task_id)
+        if not task:
+            missing.append(task_id)
+            continue
+        if task["status"] == "running":
+            skipped.append({"id": task_id, "reason": "running"})
+            continue
+        try:
+            _cleanup_task_files(task)
+            cleaned.append(task_id)
+        except Exception as exc:
+            logger.exception("Failed to clean files for task %s during batch cleanup", task_id)
+            failed.append({"id": task_id, "reason": str(exc)})
+
+    return {
+        "cleaned": cleaned,
         "skipped": skipped,
         "missing": missing,
         "failed": failed,

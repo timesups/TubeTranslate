@@ -209,8 +209,13 @@ def append_original_video_link(
     return f"{body}\n\n{marker}"
 
 
-def _fallback_meta(*, filename: str, subtitle_text: str) -> dict[str, Any]:
-    stem = Path(filename).stem[:80] or "配音视频"
+def _fallback_meta(
+    *,
+    filename: str,
+    subtitle_text: str,
+    original_title: str | None = None,
+) -> dict[str, Any]:
+    stem = (original_title or "").strip()[:80] or Path(filename).stem[:80] or "配音视频"
     lines = [line.strip() for line in subtitle_text.splitlines() if line.strip()]
     summary = " ".join(lines[:12]).strip()
     if len(summary) > 600:
@@ -229,6 +234,45 @@ def _fallback_meta(*, filename: str, subtitle_text: str) -> dict[str, Any]:
         },
         filename=filename,
     )
+
+
+def _build_prompts(
+    *,
+    filename: str,
+    subtitle_text: str,
+    original_title: str | None = None,
+) -> tuple[str, str, str]:
+    source_title = (original_title or "").strip()
+    title_block = f"原视频标题：{source_title}\n\n" if source_title else ""
+    title_rule = (
+        "title: 中文标题，不超过80字；优先参考原视频标题的主题、关键信息和表达方式，"
+        "结合字幕内容改写成适合 B 站的中文标题，不要机械直译，也不要偏离原标题主题；"
+        if source_title
+        else "title: 中文标题，不超过80字；"
+    )
+    context_hint = "原视频标题和字幕内容" if source_title else "字幕内容"
+    system_prompt = (
+        f"你是 B 站视频投稿助手。根据{context_hint}生成符合哔哩哔哩投稿规范的元数据。"
+        "必须只输出一个 JSON 对象，不要 markdown 代码块，不要额外解释。"
+        "字段："
+        'title(string), desc(string), tag(string[]), dynamic(string)。'
+        f"{title_rule}"
+        "desc: 中文简介 200-800 字，可用 \\n 表示换行；"
+        "tag: 3-10 个标签，不要带 #；"
+        "dynamic: 不超过50字。"
+    )
+    user_prompt = (
+        f"{title_block}"
+        f"视频文件名：{filename}\n\n"
+        f"字幕内容：\n{subtitle_text}\n\n"
+        '只输出 JSON：{"title":"...","desc":"...","tag":["..."],"dynamic":"..."}'
+    )
+    retry_prompt = (
+        "上一次输出无法解析为 JSON。请重新输出，且只能是合法 JSON 对象，"
+        "不要包含思考过程、Markdown 或其它文字。"
+        f"\n\n{title_block}视频文件名：{filename}\n字幕：\n{subtitle_text[:2000]}"
+    )
+    return system_prompt, user_prompt, retry_prompt
 
 
 def _message_text(response: Any) -> str:
@@ -281,7 +325,12 @@ def _chat_completion(client: Any, *, model: str, system: str, user: str, use_jso
         return client.chat.completions.create(**kwargs)
 
 
-def _generate_sync(*, filename: str, subtitle_text: str) -> dict[str, Any]:
+def _generate_sync(
+    *,
+    filename: str,
+    subtitle_text: str,
+    original_title: str | None = None,
+) -> dict[str, Any]:
     from .. import database
     from ..adapters.openai_translate import _client
 
@@ -299,25 +348,10 @@ def _generate_sync(*, filename: str, subtitle_text: str) -> dict[str, Any]:
     if len(clipped) > 6000:
         clipped = clipped[:6000] + "\n…（字幕已截断）"
 
-    system_prompt = (
-        "你是 B 站视频投稿助手。根据字幕内容生成符合哔哩哔哩投稿规范的元数据。"
-        "必须只输出一个 JSON 对象，不要 markdown 代码块，不要额外解释。"
-        "字段："
-        'title(string), desc(string), tag(string[]), dynamic(string)。'
-        "title: 中文标题，不超过80字；"
-        "desc: 中文简介 200-800 字，可用 \\n 表示换行；"
-        "tag: 3-10 个标签，不要带 #；"
-        "dynamic: 不超过50字。"
-    )
-    user_prompt = (
-        f"视频文件名：{filename}\n\n"
-        f"字幕内容：\n{clipped}\n\n"
-        '只输出 JSON：{"title":"...","desc":"...","tag":["..."],"dynamic":"..."}'
-    )
-    retry_prompt = (
-        "上一次输出无法解析为 JSON。请重新输出，且只能是合法 JSON 对象，"
-        "不要包含思考过程、Markdown 或其它文字。"
-        f"\n\n视频文件名：{filename}\n字幕：\n{clipped[:2000]}"
+    system_prompt, user_prompt, retry_prompt = _build_prompts(
+        filename=filename,
+        subtitle_text=clipped,
+        original_title=original_title,
     )
 
     client = _client(base_url, api_key)
@@ -370,7 +404,11 @@ def _generate_sync(*, filename: str, subtitle_text: str) -> dict[str, Any]:
             continue
 
     logger.error("bilibili meta generation fell back after parse failures: %s", last_error)
-    return _fallback_meta(filename=filename, subtitle_text=clipped)
+    return _fallback_meta(
+        filename=filename,
+        subtitle_text=clipped,
+        original_title=original_title,
+    )
 
 
 async def generate_bilibili_meta(
@@ -378,6 +416,7 @@ async def generate_bilibili_meta(
     filename: str,
     subtitle_text: str,
     source_url: str | None = None,
+    original_title: str | None = None,
     api_key: str | None = None,
     model: str | None = None,
 ) -> dict[str, Any]:
@@ -387,6 +426,7 @@ async def generate_bilibili_meta(
         _generate_sync,
         filename=filename,
         subtitle_text=subtitle_text,
+        original_title=original_title,
     )
     if source_url:
         meta = dict(meta)

@@ -317,6 +317,20 @@ export function deleteTask(taskId: string) {
   return request<void>(`/api/tasks/${taskId}`, { method: "DELETE" })
 }
 
+export type CleanupFilesResult = Task & {
+  cleanup: {
+    id: string
+    removed: string[]
+  }
+}
+
+export type BatchCleanupResult = {
+  cleaned: string[]
+  skipped: { id: string; reason: string }[]
+  missing: string[]
+  failed: { id: string; reason: string }[]
+}
+
 export type BatchDeleteResult = {
   deleted: string[]
   skipped: { id: string; reason: string }[]
@@ -329,6 +343,19 @@ export type BatchResumeResult = {
   skipped: { id: string; reason: string }[]
   missing: string[]
   failed: { id: string; reason: string }[]
+}
+
+export function cleanupTaskFiles(taskId: string) {
+  return request<CleanupFilesResult>(`/api/tasks/${taskId}/cleanup-files`, {
+    method: "POST",
+  })
+}
+
+export function cleanupTasksBatch(taskIds: string[]) {
+  return request<BatchCleanupResult>("/api/tasks/batch-cleanup-files", {
+    method: "POST",
+    body: JSON.stringify({ task_ids: taskIds }),
+  })
 }
 
 export function deleteTasksBatch(taskIds: string[]) {

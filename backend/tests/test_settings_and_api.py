@@ -640,6 +640,118 @@ def test_delete_task_skips_session_outside_workfolder(monkeypatch, tmp_path):
     assert outside.exists(), "Sessions outside WORKFOLDER must not be deleted."
 
 
+def test_cleanup_task_files_keeps_record_and_log(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    from backend.app.bilibili import deepseek_meta
+
+    data_dir = tmp_path / "bilibili"
+    data_dir.mkdir()
+    monkeypatch.setattr(deepseek_meta, "DATA_DIR", data_dir)
+    monkeypatch.setattr(deepseek_meta, "SETTINGS_PATH", data_dir / "settings.json")
+    staging_root = tmp_path / "staging"
+    staging_root.mkdir()
+    deepseek_meta.save_settings({"video_dir": str(staging_root)})
+
+    task_id = database.create_task(
+        "https://www.youtube.com/watch?v=cleanupvid01",
+        task_id="cleanupvid01",
+    )
+    database.update_task(task_id, title="Demo Title")
+    session = config.WORKFOLDER / "uploader" / "Demo_Title__cleanupvid01"
+    (session / "media").mkdir(parents=True)
+    (session / "media" / "video_final.mp4").write_bytes(b"mp4-data")
+    database.update_task(
+        task_id,
+        status="succeeded",
+        session_path=str(session),
+        final_video_path=str(session / "media" / "video_final.mp4"),
+    )
+    log_file = database.log_path(task_id)
+    log_file.write_text("keep this log", encoding="utf-8")
+
+    staged = staging_root / "Demo_Title__cleanupvid01.mp4"
+    staged.write_bytes(b"staged")
+    (staging_root / "Demo_Title__cleanupvid01.jpg").write_bytes(b"jpg")
+
+    output_dir = tmp_path / "exports"
+    output_dir.mkdir()
+    database.save_output_settings(str(output_dir))
+    (output_dir / "Demo_Title__cleanupvid01.mp4").write_bytes(b"export")
+    (output_dir / "Demo_Title__cleanupvid01.txt").write_text("desc", encoding="utf-8")
+
+    client = authenticated_client()
+    response = client.post(f"/api/tasks/{task_id}/cleanup-files")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == task_id
+    assert body["title"] == "Demo Title"
+    assert body["status"] == "succeeded"
+    assert body["session_path"] is None
+    assert body["final_video_path"] is None
+    assert not session.exists()
+    assert not staged.exists()
+    assert (output_dir / "Demo_Title__cleanupvid01.mp4").exists()
+    assert (output_dir / "Demo_Title__cleanupvid01.txt").exists()
+    assert log_file.exists()
+    assert log_file.read_text(encoding="utf-8") == "keep this log"
+    assert database.get_task(task_id) is not None
+    assert "removed" in body["cleanup"]
+    assert "warnings" in body["cleanup"]
+
+
+def test_cleanup_task_files_rejects_running(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    task_id = database.create_task(
+        "https://www.youtube.com/watch?v=cleanuprun01",
+        task_id="cleanuprun01",
+    )
+    database.update_task(task_id, status="running")
+    client = authenticated_client()
+    response = client.post(f"/api/tasks/{task_id}/cleanup-files")
+    assert response.status_code == 409
+    assert database.get_task(task_id) is not None
+
+
+def test_batch_cleanup_task_files(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    ok = database.create_task(
+        "https://www.youtube.com/watch?v=batchcleanok1",
+        task_id="batchcleanok1",
+    )
+    running = database.create_task(
+        "https://www.youtube.com/watch?v=batchcleanrun",
+        task_id="batchcleanrun",
+    )
+    database.update_task(ok, status="succeeded")
+    database.update_task(running, status="running")
+    session = config.WORKFOLDER / "uploader" / "title__batchcleanok1"
+    (session / "media").mkdir(parents=True)
+    (session / "media" / "video_final.mp4").write_bytes(b"x")
+    database.update_task(
+        ok,
+        session_path=str(session),
+        final_video_path=str(session / "media" / "video_final.mp4"),
+    )
+
+    client = authenticated_client()
+    response = client.post(
+        "/api/tasks/batch-cleanup-files",
+        json={"task_ids": [ok, running, "missing-clean-id", ok]},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cleaned"] == [ok]
+    assert body["skipped"] == [{"id": running, "reason": "running"}]
+    assert body["missing"] == ["missing-clean-id"]
+    assert body["failed"] == []
+    assert not session.exists()
+    kept = database.get_task(ok)
+    assert kept is not None
+    assert kept["session_path"] is None
+    assert database.get_task(running) is not None
+
+
 def test_cors_origins_include_runtime_configuration(monkeypatch):
     monkeypatch.setenv("CORS_ALLOW_ORIGINS", "http://172.27.2.90:3000, http://100.94.222.54:3000")
 

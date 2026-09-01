@@ -3,7 +3,7 @@
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { ChangeEvent, FormEvent, useCallback, useMemo, useRef, useState } from "react"
-import { ChevronLeft, ChevronRight, Loader2, Play, RotateCw, Search, Trash2, Upload } from "lucide-react"
+import { ChevronLeft, ChevronRight, FolderMinus, Loader2, Play, RotateCw, Search, Trash2, Upload } from "lucide-react"
 
 import {
   AudioMode,
@@ -15,6 +15,7 @@ import {
   TaskListStatus,
   TaskSummary,
   TtsProvider,
+  cleanupTasksBatch,
   createTasksBatch,
   deleteTasksBatch,
   isAbortError,
@@ -94,6 +95,20 @@ function batchDeleteSummaryText(
 ) {
   return template
     .replace("{deleted}", String(deleted))
+    .replace("{skipped}", String(skipped))
+    .replace("{missing}", String(missing))
+    .replace("{failed}", String(failed))
+}
+
+function batchCleanupSummaryText(
+  template: string,
+  cleaned: number,
+  skipped: number,
+  missing: number,
+  failed: number,
+) {
+  return template
+    .replace("{cleaned}", String(cleaned))
     .replace("{skipped}", String(skipped))
     .replace("{missing}", String(missing))
     .replace("{failed}", String(failed))
@@ -188,6 +203,9 @@ export default function Home() {
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
   const [batchDeleting, setBatchDeleting] = useState(false)
   const [batchDeleteError, setBatchDeleteError] = useState("")
+  const [batchCleanupOpen, setBatchCleanupOpen] = useState(false)
+  const [batchCleaning, setBatchCleaning] = useState(false)
+  const [batchCleanupError, setBatchCleanupError] = useState("")
   const [batchRetryOpen, setBatchRetryOpen] = useState(false)
   const [batchRetrying, setBatchRetrying] = useState(false)
   const [batchRetryError, setBatchRetryError] = useState("")
@@ -397,6 +415,34 @@ export default function Home() {
       setBatchDeleteError(err instanceof Error ? err.message : t.home.batchDeleteError)
     } finally {
       setBatchDeleting(false)
+    }
+  }
+
+  async function handleBatchCleanup() {
+    const taskIds = Array.from(selectedTaskIds)
+    if (!taskIds.length) {
+      setBatchCleanupError(t.home.batchCleanupNone)
+      return
+    }
+    setBatchCleaning(true)
+    setBatchCleanupError("")
+    try {
+      const result = await cleanupTasksBatch(taskIds)
+      setBatchCleanupOpen(false)
+      setMessage(
+        batchCleanupSummaryText(
+          t.home.batchCleanupSummary,
+          result.cleaned.length,
+          result.skipped.length,
+          result.missing.length,
+          result.failed.length,
+        ),
+      )
+      await pollTasks()
+    } catch (err) {
+      setBatchCleanupError(err instanceof Error ? err.message : t.home.batchCleanupError)
+    } finally {
+      setBatchCleaning(false)
     }
   }
 
@@ -1065,6 +1111,20 @@ export default function Home() {
                   </Button>
                   <Button
                     type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setBatchCleanupError("")
+                      setBatchCleanupOpen(true)
+                    }}
+                    disabled={selectedCount === 0}
+                  >
+                    <FolderMinus className="size-3.5" />
+                    {t.home.batchCleanup}
+                    {selectedCount > 0 ? ` (${selectedCount})` : ""}
+                  </Button>
+                  <Button
+                    type="button"
                     variant="destructive"
                     size="sm"
                     onClick={() => {
@@ -1170,6 +1230,39 @@ export default function Home() {
                       <RotateCw className="size-4" />
                     )}
                     {batchRetrying ? t.home.batchRetrying : t.home.batchRetryConfirm}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+
+            <Dialog open={batchCleanupOpen} onOpenChange={setBatchCleanupOpen}>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>{t.home.batchCleanupTitle}</DialogTitle>
+                  <DialogDescription>{t.home.batchCleanupDescription}</DialogDescription>
+                </DialogHeader>
+                <p className="text-sm text-muted-foreground">
+                  {selectedCountText(t.home.selectedCount, selectedCount)}
+                </p>
+                {batchCleanupError ? (
+                  <div className="rounded-lg border border-red-500/30 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+                    {batchCleanupError}
+                  </div>
+                ) : null}
+                <DialogFooter>
+                  <DialogClose render={<Button variant="outline" disabled={batchCleaning} />}>
+                    {t.common.cancel}
+                  </DialogClose>
+                  <Button
+                    onClick={handleBatchCleanup}
+                    disabled={batchCleaning || selectedCount === 0}
+                  >
+                    {batchCleaning ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <FolderMinus className="size-4" />
+                    )}
+                    {batchCleaning ? t.home.batchCleaning : t.home.batchCleanupConfirm}
                   </Button>
                 </DialogFooter>
               </DialogContent>

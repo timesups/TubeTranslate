@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 
-from ..config import ffmpeg_binary, ffprobe_binary
+from ..config import (
+    ffmpeg_binary,
+    ffprobe_binary,
+    merge_video_crf,
+    merge_video_encoder,
+    merge_video_nvenc_preset,
+)
+
+log = logging.getLogger(__name__)
 
 SUBTITLE_PUNCTUATION = {"，", ",", "；", ";", "：", ":", "。", "?", "？", "!", "！", "、"}
 SUBTITLE_PROTECTED_PAIRS = {"《": "》", "（": "）", "【": "】", "「": "」", "『": "』"}
@@ -318,6 +328,191 @@ def subtitle_filter(video_file: Path, subtitle_file: Path, session: Path) -> str
     return f"subtitles=filename='{sub_path}':force_style='{style}'"
 
 
+@lru_cache(maxsize=1)
+def _list_ffmpeg_video_encoders() -> frozenset[str]:
+    result = subprocess.run(
+        [ffmpeg_binary(), "-hide_banner", "-encoders"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return frozenset()
+    encoders: set[str] = set()
+    for line in result.stdout.splitlines():
+        if not line.startswith(" "):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].startswith("V"):
+            encoders.add(parts[1])
+    return frozenset(encoders)
+
+
+def _hardware_encoder_chain() -> list[str]:
+    available = _list_ffmpeg_video_encoders()
+    chain: list[str] = []
+    if "h264_nvenc" in available:
+        chain.append("nvenc")
+    if "h264_qsv" in available:
+        chain.append("qsv")
+    if "h264_amf" in available:
+        chain.append("amf")
+    return chain
+
+
+def merge_video_encoder_chain(*, burn_subtitles: bool, preferred: str | None = None) -> list[str]:
+    """Return ordered encoder modes to try for merge_video."""
+    mode = (preferred or merge_video_encoder()).strip().lower()
+    hardware = _hardware_encoder_chain()
+    cpu = ["x264"]
+
+    if mode == "auto":
+        if burn_subtitles:
+            return [*hardware, *cpu]
+        return ["copy", *hardware, *cpu]
+
+    if mode == "copy":
+        if burn_subtitles:
+            return [*hardware, *cpu]
+        return ["copy", *hardware, *cpu]
+
+    if mode in {"nvenc", "qsv", "amf", "x264"}:
+        chain = [mode]
+        for candidate in [*hardware, *cpu]:
+            if candidate not in chain:
+                chain.append(candidate)
+        return chain
+
+    return [*hardware, *cpu]
+
+
+def _video_encode_args(encoder: str) -> list[str]:
+    crf = str(merge_video_crf())
+    if encoder == "copy":
+        return ["-c:v", "copy"]
+    if encoder == "x264":
+        return ["-c:v", "libx264", "-preset", "fast", "-crf", crf]
+    if encoder == "nvenc":
+        return [
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            merge_video_nvenc_preset(),
+            "-rc",
+            "vbr",
+            "-cq",
+            crf,
+            "-b:v",
+            "0",
+        ]
+    if encoder == "qsv":
+        return ["-c:v", "h264_qsv", "-global_quality", crf]
+    if encoder == "amf":
+        return [
+            "-c:v",
+            "h264_amf",
+            "-quality",
+            "balanced",
+            "-rc",
+            "cqp",
+            "-qp_i",
+            crf,
+            "-qp_p",
+            crf,
+        ]
+    raise ValueError(f"Unsupported merge video encoder: {encoder}")
+
+
+def _build_merge_encode_command(
+    *,
+    video_input: Path,
+    mixed_audio_output: Path,
+    final_video_output: Path,
+    session_dir: Path,
+    burn_subtitles: bool,
+    subtitles: Path | None,
+    video_encoder: str,
+) -> list[str]:
+    encode_cmd = [
+        ffmpeg_binary(),
+        "-y",
+        "-i",
+        str(video_input),
+        "-i",
+        str(mixed_audio_output),
+    ]
+    if burn_subtitles and subtitles is not None:
+        encode_cmd.extend(
+            ["-vf", subtitle_filter(video_input, subtitles, session_dir)]
+        )
+    encode_cmd.extend(
+        [
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            *_video_encode_args(video_encoder),
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            "-shortest",
+            str(final_video_output),
+        ]
+    )
+    return encode_cmd
+
+
+def _run_merge_encode(
+    *,
+    video_input: Path,
+    mixed_audio_output: Path,
+    final_video_output: Path,
+    session_dir: Path,
+    burn_subtitles: bool,
+    subtitles: Path | None,
+    encoder_chain: list[str],
+) -> str:
+    errors: list[str] = []
+    for encoder in encoder_chain:
+        if final_video_output.exists():
+            final_video_output.unlink()
+        command = _build_merge_encode_command(
+            video_input=video_input,
+            mixed_audio_output=mixed_audio_output,
+            final_video_output=final_video_output,
+            session_dir=session_dir,
+            burn_subtitles=burn_subtitles,
+            subtitles=subtitles,
+            video_encoder=encoder,
+        )
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=session_dir,
+        )
+        if result.returncode == 0 and final_video_output.exists():
+            if encoder != encoder_chain[0]:
+                log.warning(
+                    "merge_video fell back to %s after %s failed",
+                    encoder,
+                    encoder_chain[0],
+                )
+            return encoder
+        detail = (result.stderr or result.stdout or "unknown ffmpeg error").strip()
+        errors.append(f"{encoder}: {detail.splitlines()[-1] if detail else 'failed'}")
+        log.warning("merge_video encoder %s failed: %s", encoder, detail[-500:])
+
+    raise RuntimeError(
+        "ffmpeg merge_video failed for all encoders ("
+        + ", ".join(encoder_chain)
+        + "): "
+        + "; ".join(errors)
+    )
+
+
 def extract_source_audio(video_file: Path, session: Path) -> Path:
     """Extract the original mixed audio track for ASR / TTS reference use."""
     media_dir = session / "media"
@@ -407,41 +602,15 @@ def merge_video(
             ],
             check=True,
         )
-    encode_cmd = [
-        ffmpeg_binary(),
-        "-y",
-        "-i",
-        str(video_input),
-        "-i",
-        str(mixed_audio_output),
-    ]
-    if burn_subtitles and subtitles is not None:
-        encode_cmd.extend(
-            ["-vf", subtitle_filter(video_input, subtitles, session_dir)]
-        )
-    encode_cmd.extend(
-        [
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "23",
-            "-c:a",
-            "aac",
-            "-movflags",
-            "+faststart",
-            "-shortest",
-            str(final_video_output),
-        ]
+    encoder_chain = merge_video_encoder_chain(burn_subtitles=burn_subtitles)
+    used_encoder = _run_merge_encode(
+        video_input=video_input,
+        mixed_audio_output=mixed_audio_output,
+        final_video_output=final_video_output,
+        session_dir=session_dir,
+        burn_subtitles=burn_subtitles,
+        subtitles=subtitles,
+        encoder_chain=encoder_chain,
     )
-    subprocess.run(
-        encode_cmd,
-        check=True,
-        cwd=session_dir,
-    )
+    log.info("merge_video finished with encoder %s", used_encoder)
     return final_video

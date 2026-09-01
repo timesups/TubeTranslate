@@ -102,6 +102,28 @@ def ffprobe_binary() -> str:
     return os.getenv("FFPROBE_PATH", "").strip() or "ffprobe"
 
 
+def merge_video_encoder() -> str:
+    """Video encoder for merge_video: auto, copy, x264, nvenc, qsv, or amf."""
+    value = (os.getenv("MERGE_VIDEO_ENCODER") or "auto").strip().lower()
+    allowed = {"auto", "copy", "x264", "nvenc", "qsv", "amf"}
+    return value if value in allowed else "auto"
+
+
+def merge_video_crf() -> int:
+    raw = (os.getenv("MERGE_VIDEO_CRF") or "23").strip()
+    try:
+        crf = int(raw)
+    except ValueError:
+        return 23
+    return max(0, min(51, crf))
+
+
+def merge_video_nvenc_preset() -> str:
+    value = (os.getenv("MERGE_VIDEO_NVENC_PRESET") or "p4").strip().lower()
+    allowed = {f"p{i}" for i in range(1, 8)}
+    return value if value in allowed else "p4"
+
+
 def _ffmpeg_bin_directories() -> list[Path]:
     """Resolve directories that contain FFmpeg shared DLLs (Windows TorchCodec)."""
     candidates: list[Path] = []

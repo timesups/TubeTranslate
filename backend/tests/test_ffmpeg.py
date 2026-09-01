@@ -4,7 +4,42 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from backend.app.adapters import ffmpeg
+
+
+def _complete_ffmpeg_run(
+    cmd: list[str],
+    *,
+    ffprobe_stdout: str = "1920,1080\n",
+    encoders_stdout: str = "",
+    encode_returncode: int = 0,
+    encode_stderr: str = "",
+) -> subprocess.CompletedProcess[str]:
+    binary = Path(cmd[0]).name
+    if binary.startswith("ffprobe") or cmd[0] == "ffprobe":
+        return subprocess.CompletedProcess(cmd, 0, stdout=ffprobe_stdout, stderr="")
+    if "-encoders" in cmd:
+        return subprocess.CompletedProcess(cmd, 0, stdout=encoders_stdout, stderr="")
+    output = Path(cmd[-1])
+    if encode_returncode == 0 and output.suffix.lower() == ".mp4":
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"mp4")
+    return subprocess.CompletedProcess(
+        cmd,
+        encode_returncode,
+        stdout="",
+        stderr=encode_stderr,
+    )
+
+
+@pytest.fixture(autouse=True)
+def isolated_merge_video_encoders(monkeypatch):
+    if hasattr(ffmpeg._list_ffmpeg_video_encoders, "cache_clear"):
+        ffmpeg._list_ffmpeg_video_encoders.cache_clear()
+    monkeypatch.setattr(ffmpeg, "_list_ffmpeg_video_encoders", lambda: frozenset())
+    yield
 
 
 def test_video_orientation_uses_height_greater_than_width(monkeypatch):
@@ -83,9 +118,7 @@ def test_merge_video_skips_subtitles_for_portrait(monkeypatch, tmp_path):
 
     def fake_run(cmd, capture_output=False, text=False, check=False, **kwargs):
         commands.append(cmd)
-        if Path(cmd[0]).name.startswith("ffprobe"):
-            return subprocess.CompletedProcess(cmd, 0, stdout="720,1280\n", stderr="")
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return _complete_ffmpeg_run(cmd, ffprobe_stdout="720,1280\n")
 
     monkeypatch.setattr(ffmpeg.subprocess, "run", fake_run)
 
@@ -101,6 +134,8 @@ def test_merge_video_skips_subtitles_for_portrait(monkeypatch, tmp_path):
     final_command = commands[-1]
     assert "-vf" not in final_command
     assert "subtitles=" not in " ".join(final_command)
+    assert "-c:v" in final_command
+    assert "copy" in final_command
     assert not (session / "metadata" / "subtitles.en.srt").exists()
 
 
@@ -134,9 +169,7 @@ def test_merge_video_burns_landscape_english_subtitles(monkeypatch, tmp_path):
     def fake_run(cmd, capture_output=False, text=False, check=False, **kwargs):
         commands.append(cmd)
         cwd_values.append(kwargs.get("cwd"))
-        if Path(cmd[0]).name.startswith("ffprobe"):
-            return subprocess.CompletedProcess(cmd, 0, stdout="1920,1080\n", stderr="")
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return _complete_ffmpeg_run(cmd)
 
     monkeypatch.setattr(ffmpeg.subprocess, "run", fake_run)
 
@@ -160,6 +193,129 @@ def test_merge_video_burns_landscape_english_subtitles(monkeypatch, tmp_path):
     burned = (session / "metadata" / "subtitles.en.srt").read_text(encoding="utf-8")
     assert "Hello there" in burned
     assert "你好" not in burned
+
+
+def test_merge_video_encoder_chain_auto_portrait_prefers_copy():
+    chain = ffmpeg.merge_video_encoder_chain(burn_subtitles=False, preferred="auto")
+    assert chain[0] == "copy"
+
+
+def test_merge_video_encoder_chain_auto_landscape_skips_copy():
+    chain = ffmpeg.merge_video_encoder_chain(burn_subtitles=True, preferred="auto")
+    assert "copy" not in chain
+    assert chain[-1] == "x264"
+
+
+def test_merge_video_encoder_chain_explicit_copy_with_subtitles_falls_back(monkeypatch):
+    monkeypatch.setattr(ffmpeg, "_list_ffmpeg_video_encoders", lambda: frozenset({"h264_nvenc"}))
+    chain = ffmpeg.merge_video_encoder_chain(burn_subtitles=True, preferred="copy")
+    assert chain[0] == "nvenc"
+    assert "copy" not in chain
+
+
+def test_merge_video_uses_nvenc_when_configured(monkeypatch, tmp_path):
+    monkeypatch.setenv("MERGE_VIDEO_ENCODER", "nvenc")
+    session = tmp_path / "session"
+    metadata_dir = session / "metadata"
+    metadata_dir.mkdir(parents=True)
+    timings = metadata_dir / "timings.json"
+    timings.write_text(
+        json.dumps(
+            {
+                "translation": [
+                    {
+                        "start_time": 0,
+                        "end_time": 1200,
+                        "actual_start_time": 0,
+                        "actual_end_time": 1200,
+                        "src": "Hello there",
+                        "dst": "你好",
+                        "src_lang": "en",
+                        "dst_lang": "zh",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, capture_output=False, text=False, check=False, **kwargs):
+        commands.append(cmd)
+        return _complete_ffmpeg_run(cmd)
+
+    monkeypatch.setattr(ffmpeg.subprocess, "run", fake_run)
+
+    ffmpeg.merge_video(
+        tmp_path / "video.mp4",
+        tmp_path / "dubbing.wav",
+        tmp_path / "bgm.wav",
+        timings,
+        session,
+    )
+
+    final_command = commands[-1]
+    assert "h264_nvenc" in final_command
+    assert "-cq" in final_command
+
+
+def test_merge_video_falls_back_from_nvenc_to_x264(monkeypatch, tmp_path):
+    monkeypatch.setenv("MERGE_VIDEO_ENCODER", "nvenc")
+    session = tmp_path / "session"
+    metadata_dir = session / "metadata"
+    metadata_dir.mkdir(parents=True)
+    timings = metadata_dir / "timings.json"
+    timings.write_text(
+        json.dumps(
+            {
+                "translation": [
+                    {
+                        "start_time": 0,
+                        "end_time": 1200,
+                        "actual_start_time": 0,
+                        "actual_end_time": 1200,
+                        "src": "Hello",
+                        "dst": "你好",
+                        "src_lang": "en",
+                        "dst_lang": "zh",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+    encode_attempts = {"count": 0}
+
+    def fake_run(cmd, capture_output=False, text=False, check=False, **kwargs):
+        commands.append(cmd)
+        if Path(cmd[0]).name.startswith("ffprobe") or cmd[0] == "ffprobe":
+            return _complete_ffmpeg_run(cmd, ffprobe_stdout="720,1280\n")
+        if "h264_nvenc" in cmd:
+            encode_attempts["count"] += 1
+            return _complete_ffmpeg_run(
+                cmd,
+                ffprobe_stdout="720,1280\n",
+                encode_returncode=1,
+                encode_stderr="nvenc failed",
+            )
+        return _complete_ffmpeg_run(cmd, ffprobe_stdout="720,1280\n")
+
+    monkeypatch.setattr(ffmpeg.subprocess, "run", fake_run)
+    monkeypatch.setattr(ffmpeg, "_list_ffmpeg_video_encoders", lambda: frozenset({"h264_nvenc"}))
+
+    final_video = ffmpeg.merge_video(
+        tmp_path / "video.mp4",
+        tmp_path / "dubbing.wav",
+        None,
+        timings,
+        session,
+        replace_audio=True,
+    )
+
+    assert final_video.exists()
+    assert encode_attempts["count"] == 1
+    assert any("libx264" in cmd for cmd in commands)
 
 
 def test_merge_video_uses_absolute_media_paths_when_cwd_is_session(monkeypatch, tmp_path):
@@ -194,9 +350,8 @@ def test_merge_video_uses_absolute_media_paths_when_cwd_is_session(monkeypatch, 
         commands.append(cmd)
         cwd_values.append(kwargs.get("cwd"))
         if cmd[0] == "ffprobe":
-            # Landscape so subtitles path still exercises the encode command.
-            return subprocess.CompletedProcess(cmd, 0, stdout="1920,1080\n", stderr="")
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            return _complete_ffmpeg_run(cmd)
+        return _complete_ffmpeg_run(cmd)
 
     monkeypatch.setattr(ffmpeg.subprocess, "run", fake_run)
 

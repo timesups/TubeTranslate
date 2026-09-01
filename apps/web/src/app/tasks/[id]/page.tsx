@@ -7,6 +7,7 @@ import {
   Circle,
   Download,
   FileText,
+  FolderMinus,
   Loader2,
   Play,
   RotateCw,
@@ -18,6 +19,7 @@ import {
   ExecutionMode,
   StageStatus,
   Task,
+  cleanupTaskFiles,
   continueTask,
   deleteTask,
   finalVideoDownloadUrl,
@@ -96,6 +98,10 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState("")
+  const [cleanupOpen, setCleanupOpen] = useState(false)
+  const [cleaning, setCleaning] = useState(false)
+  const [cleanupError, setCleanupError] = useState("")
+  const [cleanupMessage, setCleanupMessage] = useState("")
   const [rerunOpen, setRerunOpen] = useState(false)
   const [rerunning, setRerunning] = useState(false)
   const [rerunError, setRerunError] = useState("")
@@ -133,6 +139,24 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
     } catch (err) {
       setDeleteError(err instanceof Error ? err.message : t.task.deleteError)
       setDeleting(false)
+    }
+  }
+
+  const handleCleanup = async () => {
+    invalidatePolling()
+    setCleaning(true)
+    setCleanupError("")
+    setCleanupMessage("")
+    try {
+      const next = await cleanupTaskFiles(id)
+      invalidatePolling()
+      setCleanupOpen(false)
+      setTask(next)
+      setCleanupMessage(t.task.cleanupDone)
+    } catch (err) {
+      setCleanupError(err instanceof Error ? err.message : t.task.cleanupError)
+    } finally {
+      setCleaning(false)
     }
   }
 
@@ -530,6 +554,42 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                 </DialogContent>
               </Dialog>
             </div>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-sm text-muted-foreground">{t.task.cleanupHelp}</p>
+              <Dialog open={cleanupOpen} onOpenChange={setCleanupOpen}>
+                <DialogTrigger
+                  render={
+                    <Button variant="outline" disabled={!task || isRunning}>
+                      <FolderMinus className="size-4" />
+                      {t.task.cleanupTask}
+                    </Button>
+                  }
+                />
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>{t.task.cleanupTitle}</DialogTitle>
+                    <DialogDescription>{t.task.cleanupDescription}</DialogDescription>
+                  </DialogHeader>
+                  {cleanupError ? (
+                    <div className="rounded-lg border border-red-500/30 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+                      {cleanupError}
+                    </div>
+                  ) : null}
+                  <DialogFooter>
+                    <DialogClose render={<Button variant="outline" disabled={cleaning} />}>
+                      {t.common.cancel}
+                    </DialogClose>
+                    <Button onClick={handleCleanup} disabled={cleaning}>
+                      {cleaning ? <Loader2 className="size-4 animate-spin" /> : <FolderMinus className="size-4" />}
+                      {cleaning ? t.task.cleaning : t.task.confirmCleanup}
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            </div>
+            {cleanupMessage ? (
+              <p className="text-sm text-emerald-400">{cleanupMessage}</p>
+            ) : null}
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <p className="text-sm text-muted-foreground">
                 {t.task.deleteHelp} <code className="font-mono text-xs">workfolder/</code>

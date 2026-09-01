@@ -75,19 +75,31 @@ def _find_item(item_id: str) -> dict[str, Any]:
     raise HTTPException(status_code=404, detail=f"未找到视频：{item_id}")
 
 
-def _task_url_for_staging_item(item: dict[str, Any]) -> str | None:
-    """Staging stems are `{title}__{task_id}`; recover the task URL when present."""
+def _task_for_staging_item(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Staging stems are `{title}__{task_id}`; recover the source task when present."""
     stem = str(item.get("stem") or item.get("id") or "")
     if "__" not in stem:
         return None
     task_id = stem.rsplit("__", 1)[-1].strip()
     if not task_id:
         return None
-    task = database.get_task(task_id)
+    return database.get_task(task_id)
+
+
+def _task_url_for_staging_item(item: dict[str, Any]) -> str | None:
+    task = _task_for_staging_item(item)
     if not task:
         return None
     url = str(task.get("url") or "").strip()
     return url or None
+
+
+def _task_title_for_staging_item(item: dict[str, Any]) -> str | None:
+    task = _task_for_staging_item(item)
+    if not task:
+        return None
+    title = str(task.get("title") or "").strip()
+    return title or None
 
 
 @router.get("/auth/status")
@@ -215,6 +227,7 @@ async def generate(body: GenerateBody) -> dict[str, Any]:
             filename=item["name"],
             subtitle_text=subtitle,
             source_url=_task_url_for_staging_item(item),
+            original_title=_task_title_for_staging_item(item),
         )
     except HTTPException:
         raise

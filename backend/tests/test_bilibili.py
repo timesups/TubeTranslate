@@ -109,7 +109,7 @@ def test_generate_meta_uses_openai_settings(monkeypatch, tmp_path):
 
     database.save_openai_settings("https://example.com/v1", "sk-shared", "gpt-test")
 
-    def fake_generate_sync(*, filename: str, subtitle_text: str):
+    def fake_generate_sync(*, filename: str, subtitle_text: str, original_title: str | None = None):
         assert "demo" in filename
         assert "hello" in subtitle_text
         return {
@@ -155,7 +155,7 @@ def test_append_original_video_link_for_youtube_only():
 def test_generate_bilibili_meta_appends_youtube_link(monkeypatch, tmp_path):
     configure_tmp_runtime(monkeypatch, tmp_path)
 
-    def fake_generate_sync(*, filename: str, subtitle_text: str):
+    def fake_generate_sync(*, filename: str, subtitle_text: str, original_title: str | None = None):
         return {
             "title": "标题",
             "desc": "简介正文",
@@ -209,3 +209,64 @@ def test_fallback_meta_from_subtitle():
     assert "Fix_edge_loops_in_Blender" in result["title"]
     assert "Select the edge loop" in result["desc"]
     assert result["tag_str"]
+
+
+def test_build_prompts_includes_original_title_and_subtitles():
+    system, user, retry = deepseek_meta._build_prompts(
+        filename="demo.mp4",
+        subtitle_text="先选择循环边，再溶解它。",
+        original_title="Fix Edge Loops in Blender Fast",
+    )
+    assert "原视频标题" in system
+    assert "结合字幕内容" in system
+    assert "Fix Edge Loops in Blender Fast" in user
+    assert "先选择循环边" in user
+    assert "Fix Edge Loops in Blender Fast" in retry
+
+    system_plain, user_plain, _ = deepseek_meta._build_prompts(
+        filename="demo.mp4",
+        subtitle_text="hello",
+    )
+    assert "原视频标题" not in system_plain
+    assert "原视频标题" not in user_plain
+
+
+def test_generate_bilibili_meta_forwards_original_title(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    seen: dict[str, str | None] = {}
+
+    def fake_generate_sync(
+        *,
+        filename: str,
+        subtitle_text: str,
+        original_title: str | None = None,
+    ):
+        seen["original_title"] = original_title
+        return {
+            "title": "中文标题",
+            "desc": "简介正文",
+            "tag": ["配音"],
+            "tag_str": "配音",
+            "dynamic": "",
+            "raw": {},
+        }
+
+    monkeypatch.setattr(deepseek_meta, "_generate_sync", fake_generate_sync)
+    asyncio.run(
+        deepseek_meta.generate_bilibili_meta(
+            filename="demo.mp4",
+            subtitle_text="hello",
+            original_title="Original YouTube Title",
+        )
+    )
+    assert seen["original_title"] == "Original YouTube Title"
+
+
+def test_fallback_meta_prefers_original_title():
+    result = deepseek_meta._fallback_meta(
+        filename="sanitized_stem__abc.mp4",
+        subtitle_text="Select the edge loop.",
+        original_title="Fix Edge Loops in Blender Fast",
+    )
+    assert result["title"] == "Fix Edge Loops in Blender Fast"
+    assert "Fix Edge Loops in Blender Fast" in result["desc"]

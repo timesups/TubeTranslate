@@ -140,6 +140,8 @@ OPENAI_MODEL=deepseek-v4-flash
 | `WORKFOLDER` | 任务会话与中间文件目录（默认 `./workfolder`） |
 | `OUTPUT_DIR` | 可选；完成后额外导出成片与字幕 |
 | `FFMPEG_PATH` / `FFPROBE_PATH` | FFmpeg 不在 PATH 时指定 |
+| `MERGE_VIDEO_ENCODER` | 合成视频编码：`auto`（默认）、`copy`、`x264`、`nvenc`、`qsv`、`amf`；`auto` 时竖屏优先 copy，横屏烧字幕优先 GPU |
+| `MERGE_VIDEO_CRF` / `MERGE_VIDEO_NVENC_PRESET` | 合成质量与 NVENC preset（默认 CRF/CQ 23、p4） |
 | `HTTP_PROXY` / `NO_PROXY` | yt-dlp / HTTPX 代理 |
 | `VOLCENGINE_TTS_*` / `AZURE_TTS_*` | 云端 TTS（也可在 Web 设置里配置） |
 
