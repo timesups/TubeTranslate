@@ -128,11 +128,6 @@ def package_output_suffix() -> str:
     return (os.getenv("PACKAGE_OUTPUT_SUFFIX") or "_译制").strip() or "_译制"
 
 
-def package_export_subtitle() -> bool:
-    raw = (os.getenv("PACKAGE_EXPORT_SUBTITLE") or "true").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
-
-
 def package_continue_on_error() -> bool:
     raw = (os.getenv("PACKAGE_CONTINUE_ON_ERROR") or "true").strip().lower()
     return raw not in {"0", "false", "no", "off"}
@@ -256,29 +251,9 @@ def output_defaults() -> dict[str, str]:
     }
 
 
-def volcengine_tts_defaults() -> dict[str, str]:
-    return {
-        "app_id": os.getenv("VOLCENGINE_TTS_APP_ID", ""),
-        "access_key": os.getenv("VOLCENGINE_TTS_ACCESS_KEY", ""),
-        "api_key": os.getenv("VOLCENGINE_TTS_API_KEY", ""),
-        "resource_id": os.getenv("VOLCENGINE_TTS_RESOURCE_ID", "seed-tts-2.0"),
-        "speaker": os.getenv(
-            "VOLCENGINE_TTS_SPEAKER",
-            "zh_female_shuangkuaisisi_moon_bigtts",
-        ),
-        "endpoint": os.getenv(
-            "VOLCENGINE_TTS_ENDPOINT",
-            "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
-        ),
-        "sample_rate": os.getenv("VOLCENGINE_TTS_SAMPLE_RATE", "24000"),
-        "speech_rate": os.getenv("VOLCENGINE_TTS_SPEECH_RATE", "0"),
-        "concurrency": os.getenv("VOLCENGINE_TTS_CONCURRENCY", "4"),
-        "uid": os.getenv("VOLCENGINE_TTS_UID", "youdub-webui"),
-    }
-
-
 def azure_tts_defaults() -> dict[str, str]:
     return {
+        # One or more keys: separate with newlines, commas, or semicolons.
         "subscription_key": os.getenv("AZURE_TTS_SUBSCRIPTION_KEY", ""),
         "region": os.getenv("AZURE_TTS_REGION", "eastasia"),
         "voice": os.getenv("AZURE_TTS_VOICE", "zh-CN-XiaoxiaoNeural"),

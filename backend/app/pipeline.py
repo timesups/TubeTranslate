@@ -29,7 +29,10 @@ def _replace_original_audio(task: dict | None) -> bool:
 def _task_tts_provider(task: dict | None) -> str:
     if not task:
         return database.DEFAULT_TTS_PROVIDER
-    return task.get("tts_provider") or database.DEFAULT_TTS_PROVIDER
+    try:
+        return database.normalize_tts_provider(task.get("tts_provider"))
+    except ValueError:
+        return database.DEFAULT_TTS_PROVIDER
 
 
 @dataclass
@@ -96,23 +99,22 @@ class PipelineRunner:
 
         execution_mode = task.get("execution_mode") or database.DEFAULT_EXECUTION_MODE
         status = task["status"]
-        if status not in ("queued", "paused"):
+        if status == "paused":
+            return
+        if status != "queued":
             return
 
-        if status == "queued":
-            updates: dict[str, str] = {"status": "running"}
-            if not task.get("started_at"):
-                updates["started_at"] = database.now_iso()
-            database.update_task(self.task_id, **updates)
-            self.log("Task started")
-        else:
-            database.update_task(self.task_id, status="running")
-            self.log("Task continued")
+        updates: dict[str, str] = {"status": "running"}
+        if not task.get("started_at"):
+            updates["started_at"] = database.now_iso()
+        database.update_task(self.task_id, **updates)
+        self.log("Task started")
 
         try:
             validate_runtime_device()
             self.log(f"Device plan: {device_plan_summary()}")
             for stage in STAGES:
+                database.raise_if_task_pause_requested(self.task_id)
                 if self._stage_status(stage.name) == "succeeded":
                     database.update_task(self.task_id, current_stage=stage.name)
                     database.update_stage(self.task_id, stage.name, progress=100)
@@ -120,6 +122,7 @@ class PipelineRunner:
                     self.log(f"[{stage.name}] Reused cached output")
                     continue
                 self._run_stage(stage.name)
+                database.raise_if_task_pause_requested(self.task_id)
                 if execution_mode == "manual" and stage != STAGES[-1]:
                     database.update_task(self.task_id, status="paused")
                     self.log(f"Paused after [{stage.name}], waiting for manual continue")
@@ -133,6 +136,8 @@ class PipelineRunner:
                 completed_at=database.now_iso(),
             )
             self.log("Task succeeded")
+        except database.PauseRequested:
+            self.log("Paused by user")
         except Exception as exc:
             current = database.get_task(self.task_id)
             failed_stage = current["current_stage"] if current else None
@@ -202,10 +207,6 @@ class PipelineRunner:
         if exported is None:
             return
         self.log(f"Exported final video -> {exported.video}")
-        if exported.subtitle is not None:
-            self.log(f"Exported Chinese subtitles -> {exported.subtitle}")
-        else:
-            self.log("Chinese subtitles were not found; skipped subtitle export")
         if exported.description is not None:
             self.log(f"Exported Bilibili description -> {exported.description}")
         else:
@@ -237,6 +238,7 @@ class PipelineRunner:
         self.log(f"[{stage}] {message}")
 
     def stage_progress(self, stage: str, progress: int, message: str, *, force: bool = False) -> None:
+        database.raise_if_task_pause_requested(self.task_id)
         bounded = max(0, min(100, int(progress)))
         now = monotonic()
         previous = self._progress_state.get(stage)
@@ -561,14 +563,13 @@ class PipelineRunner:
     def _split_audio(self, task: dict) -> None:
         session = _require(self.artifacts.session, "session")
         provider = _task_tts_provider(task)
-        if provider in {"volcengine", "azure"}:
+        if provider == "azure":
             vocals_dir = session / "segments" / "vocals"
             vocals_dir.mkdir(parents=True, exist_ok=True)
             self.artifacts.vocals_dir = vocals_dir
-            label = "Volcengine TTS" if provider == "volcengine" else "Azure TTS"
             self.stage_message(
                 "split_audio",
-                f"Skipped vocal reference splitting for {label}",
+                "Skipped vocal reference splitting for Azure TTS",
             )
             return
 
@@ -583,23 +584,6 @@ class PipelineRunner:
         session = _require(self.artifacts.session, "session")
         translation_file = _require(self.artifacts.translation_file, "translation_file")
         provider = _task_tts_provider(task)
-
-        if provider == "volcengine":
-            from .adapters.volcengine_tts import generate_tts as generate_volcengine_tts
-
-            self.artifacts.tts_dir = generate_volcengine_tts(
-                translation_file,
-                session,
-                progress_callback=lambda progress, message: self.stage_progress(
-                    "tts", progress, message
-                ),
-            )
-            wav_count = len(list(self.artifacts.tts_dir.glob("*.wav")))
-            self.stage_message(
-                "tts",
-                f"Generated {wav_count} Volcengine TTS clips -> {self.artifacts.tts_dir}",
-            )
-            return
 
         if provider == "azure":
             from .adapters.azure_tts import generate_tts as generate_azure_tts

@@ -38,19 +38,16 @@ def test_export_package_item_writes_next_to_source(tmp_path):
     metadata.mkdir(parents=True)
     (metadata / "subtitles.zh.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\n你好\n", encoding="utf-8")
 
-    exported_video, exported_subtitle = package_tasks.export_package_item(
+    exported_video = package_tasks.export_package_item(
         final_video=final_video,
         source_path=source,
         output_suffix="_译制",
-        export_subtitle=True,
         session=tmp_path / "session",
     )
 
     assert exported_video == tmp_path / "clip_译制.mp4"
     assert exported_video.read_bytes() == b"final"
-    assert exported_subtitle == tmp_path / "clip_译制.srt"
-    assert exported_subtitle is not None
-    assert "你好" in exported_subtitle.read_text(encoding="utf-8")
+    assert not (tmp_path / "clip_译制.srt").exists()
 
 
 def test_create_and_get_task_package(monkeypatch, tmp_path):
@@ -80,7 +77,59 @@ def test_create_and_get_task_package(monkeypatch, tmp_path):
     assert package is not None
     assert package["name"] == "batch"
     assert len(package["items"]) == 2
+    assert package["item_count"] == 2
+    assert package["failed_count"] == 0
     assert package["items"][0]["stages"][0]["name"] == "download"
+
+
+def test_retry_failed_package_items_api(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    source_dir = tmp_path / "retry"
+    source_dir.mkdir()
+    (source_dir / "ok.mp4").write_bytes(b"x")
+    (source_dir / "bad.mp4").write_bytes(b"y")
+    package_id = package_db.create_package(
+        name="retry-batch",
+        source_root=str(source_dir),
+        output_suffix="_译制",
+        direction="en-zh",
+        execution_mode="auto",
+        audio_mode="replace",
+        tts_provider="azure",
+        export_subtitle=True,
+        continue_on_error=True,
+        skip_if_export_exists=False,
+        items=[
+            {"source_path": str(source_dir / "ok.mp4"), "relative_path": "ok.mp4", "title": "ok"},
+            {"source_path": str(source_dir / "bad.mp4"), "relative_path": "bad.mp4", "title": "bad"},
+        ],
+    )
+    package = package_db.get_package(package_id)
+    assert package is not None
+    ok_id, bad_id = package["items"][0]["id"], package["items"][1]["id"]
+    package_db.update_package_item(ok_id, status="succeeded", current_stage="done")
+    package_db.update_package_item(bad_id, status="failed", current_stage="asr", error_message="boom")
+    package_db.update_package_item_stage(bad_id, "asr", status="failed", error_message="boom")
+    package_db.update_package(package_id, status="partial")
+
+    enqueued: list[str] = []
+    monkeypatch.setattr("backend.app.main.worker.enqueue_package", lambda package_id: enqueued.append(package_id))
+    client = authenticated_client()
+    response = client.post(f"/api/task-packages/{package_id}/retry-failed")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["retried_count"] == 1
+    assert body["status"] == "queued"
+    assert body["failed_count"] == 0
+    assert enqueued == [package_id]
+
+    refreshed = package_db.get_package(package_id)
+    assert refreshed is not None
+    items = {item["id"]: item for item in refreshed["items"]}
+    assert items[ok_id]["status"] == "succeeded"
+    assert items[bad_id]["status"] == "pending"
+    asr_stage = next(stage for stage in items[bad_id]["stages"] if stage["name"] == "asr")
+    assert asr_stage["status"] == "pending"
 
 
 def test_scan_task_package_api(monkeypatch, tmp_path):
@@ -123,6 +172,174 @@ def test_create_task_package_api_enqueues(monkeypatch, tmp_path):
     assert body["name"] == "My Batch"
     assert len(body["items"]) == 1
     assert enqueued == [body["id"]]
+
+
+def test_delete_running_task_package(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    source_dir = tmp_path / "delete-batch"
+    source_dir.mkdir()
+    (source_dir / "clip.mp4").write_bytes(b"x")
+    package_id = package_db.create_package(
+        name="delete-me",
+        source_root=str(source_dir),
+        output_suffix="_译制",
+        direction="en-zh",
+        execution_mode="auto",
+        audio_mode="replace",
+        tts_provider="azure",
+        export_subtitle=True,
+        continue_on_error=True,
+        skip_if_export_exists=False,
+        items=[
+            {"source_path": str(source_dir / "clip.mp4"), "relative_path": "clip.mp4", "title": "clip"},
+        ],
+    )
+    package_db.update_package(package_id, status="running")
+    workfolder = tmp_path / "workfolder"
+    session_root = workfolder / "packages" / package_id
+    session_root.mkdir(parents=True)
+    (session_root / "marker.txt").write_text("temp", encoding="utf-8")
+    package_db.log_path(package_id).parent.mkdir(parents=True, exist_ok=True)
+    package_db.log_path(package_id).write_text("log", encoding="utf-8")
+
+    client = authenticated_client()
+    response = client.delete(f"/api/task-packages/{package_id}")
+    assert response.status_code == 200
+    assert response.json()["deleted"] is True
+    assert package_db.get_package(package_id) is None
+    assert not session_root.exists()
+    assert not package_db.log_path(package_id).exists()
+
+
+def test_run_package_stops_when_package_deleted(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    from backend.app import package_pipeline
+
+    source_dir = tmp_path / "cancel-batch"
+    source_dir.mkdir()
+    (source_dir / "clip.mp4").write_bytes(b"x")
+    package_id = package_db.create_package(
+        name="cancel-me",
+        source_root=str(source_dir),
+        output_suffix="_译制",
+        direction="en-zh",
+        execution_mode="auto",
+        audio_mode="replace",
+        tts_provider="azure",
+        export_subtitle=True,
+        continue_on_error=True,
+        skip_if_export_exists=False,
+        items=[
+            {"source_path": str(source_dir / "clip.mp4"), "relative_path": "clip.mp4", "title": "clip"},
+        ],
+    )
+    package = package_db.get_package(package_id)
+    assert package is not None
+    item_id = package["items"][0]["id"]
+
+    def fake_run(self):
+        package_db.delete_package(package_id)
+        raise package_pipeline.PackageDeletedError(package_id)
+
+    monkeypatch.setattr(package_pipeline.PackageItemPipelineRunner, "run", fake_run)
+    package_pipeline.run_package(package_id)
+    assert package_db.get_package(package_id) is None
+
+
+def test_pause_task_package_immediately_when_queued(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    source_dir = tmp_path / "pause-batch"
+    source_dir.mkdir()
+    (source_dir / "clip.mp4").write_bytes(b"x")
+    package_id = package_db.create_package(
+        name="pause-batch",
+        source_root=str(source_dir),
+        output_suffix="_译制",
+        direction="en-zh",
+        execution_mode="auto",
+        audio_mode="replace",
+        tts_provider="azure",
+        export_subtitle=True,
+        continue_on_error=True,
+        skip_if_export_exists=False,
+        items=[
+            {"source_path": str(source_dir / "clip.mp4"), "relative_path": "clip.mp4", "title": "clip"},
+        ],
+    )
+
+    client = authenticated_client()
+    response = client.post(f"/api/task-packages/{package_id}/pause")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "paused"
+    assert body["pause_requested"] is False
+
+
+def test_batch_delete_and_retry_task_packages(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    source_dir = tmp_path / "batch-ops"
+    source_dir.mkdir()
+    (source_dir / "ok.mp4").write_bytes(b"x")
+    (source_dir / "bad.mp4").write_bytes(b"y")
+    package_id = package_db.create_package(
+        name="batch-ops",
+        source_root=str(source_dir),
+        output_suffix="_译制",
+        direction="en-zh",
+        execution_mode="auto",
+        audio_mode="replace",
+        tts_provider="azure",
+        export_subtitle=True,
+        continue_on_error=True,
+        skip_if_export_exists=False,
+        items=[
+            {"source_path": str(source_dir / "ok.mp4"), "relative_path": "ok.mp4", "title": "ok"},
+            {"source_path": str(source_dir / "bad.mp4"), "relative_path": "bad.mp4", "title": "bad"},
+        ],
+    )
+    package = package_db.get_package(package_id)
+    assert package is not None
+    ok_id, bad_id = package["items"][0]["id"], package["items"][1]["id"]
+    package_db.update_package_item(ok_id, status="succeeded", current_stage="done")
+    package_db.update_package_item(bad_id, status="failed", current_stage="asr", error_message="boom")
+    package_db.update_package(package_id, status="partial")
+    workfolder = tmp_path / "workfolder"
+    session_root = workfolder / "packages" / package_id
+    session_root.mkdir(parents=True)
+    (session_root / "marker.txt").write_text("temp", encoding="utf-8")
+
+    enqueued: list[str] = []
+    monkeypatch.setattr("backend.app.main.worker.enqueue_package", lambda pid: enqueued.append(pid))
+    client = authenticated_client()
+
+    cleanup_response = client.post(
+        "/api/task-packages/batch-cleanup-files",
+        json={"package_ids": [package_id]},
+    )
+    assert cleanup_response.status_code == 200
+    cleanup_body = cleanup_response.json()
+    assert cleanup_body["cleaned"] == [package_id]
+    assert not session_root.exists()
+    refreshed = package_db.get_package(package_id)
+    assert refreshed is not None
+    assert refreshed["items"][0]["session_path"] is None
+
+    retry_response = client.post(
+        "/api/task-packages/batch-retry-failed",
+        json={"package_ids": [package_id]},
+    )
+    assert retry_response.status_code == 200
+    retry_body = retry_response.json()
+    assert retry_body["retried"] == [package_id]
+    assert enqueued == [package_id]
+
+    delete_response = client.post(
+        "/api/task-packages/batch-delete",
+        json={"package_ids": [package_id]},
+    )
+    assert delete_response.status_code == 200
+    assert delete_response.json()["deleted"] == [package_id]
+    assert package_db.get_package(package_id) is None
 
 
 def test_import_path_video_creates_session(monkeypatch, tmp_path):

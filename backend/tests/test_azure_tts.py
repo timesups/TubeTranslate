@@ -15,6 +15,87 @@ def configure_db(monkeypatch, tmp_path):
     database.init_db()
 
 
+def test_validate_subscription_keys_reports_per_key(monkeypatch):
+    class FakeResponse:
+        def __init__(self, status_code: int, payload=None, text=""):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = text
+            self.content = b""
+            self.headers = {"content-type": "application/json"}
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, url, headers=None):
+            key = (headers or {}).get("Ocp-Apim-Subscription-Key")
+            if key == "good-key":
+                return FakeResponse(200, payload=[{"ShortName": "zh-CN-XiaoxiaoNeural"}])
+            return FakeResponse(401, text="Unauthorized")
+
+    monkeypatch.setattr(azure_tts.httpx, "Client", FakeClient)
+    result = azure_tts.validate_subscription_keys(
+        region="eastasia",
+        subscription_key="good-key\nbad-key",
+    )
+    assert result["total"] == 2
+    assert result["ok_count"] == 1
+    assert result["failed_count"] == 1
+    assert result["ok"] is False
+    assert result["results"][0]["ok"] is True
+    assert result["results"][1]["ok"] is False
+
+
+def test_parse_subscription_keys_supports_multiline_and_csv():
+    assert azure_tts.parse_subscription_keys("key-a\nkey-b") == ["key-a", "key-b"]
+    assert azure_tts.parse_subscription_keys("key-a, key-b;key-c") == ["key-a", "key-b", "key-c"]
+    assert azure_tts.parse_subscription_keys("key-a\nkey-a\n") == ["key-a"]
+    assert azure_tts.parse_subscription_keys("********") == []
+
+
+def test_subscription_key_pool_round_robin_and_penalize():
+    pool = azure_tts.SubscriptionKeyPool(["k1", "k2", "k3"])
+    assert [pool.acquire() for _ in range(3)] == ["k1", "k2", "k3"]
+    assert pool.acquire() == "k1"
+    pool.penalize("k2", seconds=30)
+    # Next free keys skip the cooled-down one.
+    assert pool.acquire() in {"k1", "k3"}
+    assert pool.acquire() in {"k1", "k3"}
+
+
+def test_azure_settings_accept_multiple_keys(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    database.save_azure_tts_settings(
+        subscription_key="key-one\nkey-two,key-three",
+        region="eastasia",
+        voice="zh-CN-XiaoxiaoNeural",
+        locale="zh-CN",
+        endpoint="",
+        output_format="audio-24khz-48kbitrate-mono-mp3",
+        speech_rate="0",
+        concurrency="12",
+    )
+    settings = database.get_azure_tts_settings()
+    assert settings["subscription_key"] == "key-one\nkey-two\nkey-three"
+    client = authenticated_client()
+    response = client.get("/api/settings/azure-tts")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["has_subscription_key"] is True
+    assert body["key_count"] == 3
+    assert body["subscription_key"] == "********"
+
+
 def test_build_ssml_escapes_and_applies_rate():
     ssml = azure_tts.build_ssml(
         '你好 <世界> & "朋友"',
@@ -59,6 +140,7 @@ def test_azure_settings_mask_and_preserve_secrets(monkeypatch, tmp_path):
     body = response.json()
     assert body["subscription_key"] == "********"
     assert body["has_subscription_key"] is True
+    assert body["key_count"] == 1
     assert body["voice"] == "zh-CN-XiaoxiaoNeural"
 
     saved = client.post(

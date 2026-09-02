@@ -44,7 +44,7 @@ def test_export_final_video_noop_when_output_dir_empty(tmp_path):
     )
 
 
-def test_export_final_video_copies_video_and_matching_chinese_srt(tmp_path):
+def test_export_final_video_copies_video_without_subtitle(tmp_path):
     session, source = _session_with_zh_subtitle(tmp_path)
     dest_dir = tmp_path / "out"
     exported = export_video.export_final_video(
@@ -56,11 +56,12 @@ def test_export_final_video_copies_video_and_matching_chinese_srt(tmp_path):
     )
     assert exported is not None
     assert exported.video == dest_dir / "Demo__tid1.mp4"
-    assert exported.subtitle == dest_dir / "Demo__tid1.srt"
+    assert exported.subtitle is None
     assert exported.video.read_bytes() == b"mp4"
+    assert not (dest_dir / "Demo__tid1.srt").exists()
 
 
-def test_export_final_video_builds_chinese_srt_from_timings_when_missing(tmp_path):
+def test_export_final_video_does_not_build_subtitle_for_output_dir(tmp_path):
     session = tmp_path / "session"
     media = session / "media"
     metadata = session / "metadata"
@@ -97,9 +98,9 @@ def test_export_final_video_builds_chinese_srt_from_timings_when_missing(tmp_pat
         session=session,
     )
     assert exported is not None
-    assert exported.subtitle == dest_dir / "Demo__tid1.srt"
-    assert "你好" in exported.subtitle.read_text(encoding="utf-8")
-    assert (session / "metadata" / "subtitles.zh.srt").exists()
+    assert exported.subtitle is None
+    assert not (dest_dir / "Demo__tid1.srt").exists()
+    assert not (session / "metadata" / "subtitles.zh.srt").exists()
 
 
 def test_export_final_video_writes_bilibili_description(tmp_path):
@@ -202,12 +203,10 @@ def test_pipeline_exports_only_when_auto_publish_disabled(monkeypatch, tmp_path)
     task = database.get_task(task_id)
     assert task["status"] == "succeeded"
     exported_video = export_dir / f"Export_Demo__{task_id}.mp4"
-    exported_srt = export_dir / f"Export_Demo__{task_id}.srt"
     exported_desc = export_dir / f"Export_Demo__{task_id}.bilibili.txt"
     assert exported_video.exists()
-    assert exported_srt.exists()
+    assert not (export_dir / f"Export_Demo__{task_id}.srt").exists()
     assert exported_desc.exists()
-    assert "导出字幕" in exported_srt.read_text(encoding="utf-8")
     assert "导出简介" in exported_desc.read_text(encoding="utf-8")
 
 

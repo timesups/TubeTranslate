@@ -145,7 +145,7 @@ OPENAI_MODEL=deepseek-v4-flash
 | `PACKAGE_ALLOWED_ROOTS` | 目录批处理允许扫描的根目录（分号分隔）；留空则不限制 |
 | `PACKAGE_OUTPUT_SUFFIX` | 批处理导出后缀（默认 `_译制`） |
 | `HTTP_PROXY` / `NO_PROXY` | yt-dlp / HTTPX 代理 |
-| `VOLCENGINE_TTS_*` / `AZURE_TTS_*` | 云端 TTS（也可在 Web 设置里配置） |
+| `AZURE_TTS_*` | Azure 云端 TTS（也可在 Web 设置里配置；`AZURE_TTS_SUBSCRIPTION_KEY` 支持多个 key，用逗号/换行分隔） |
 
 翻译与 B 站简介生成都走 Web **设置 → OpenAI**（或上述环境变量默认值），无需再单独配置 DeepSeek Key。
 

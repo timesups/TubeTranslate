@@ -88,7 +88,7 @@ export type StageStatus = "pending" | "running" | "succeeded" | "failed"
 export type TaskStatus = "queued" | "running" | "paused" | "succeeded" | "failed"
 export type ExecutionMode = "auto" | "manual"
 export type AudioMode = "keep_bgm" | "replace"
-export type TtsProvider = "voxcpm" | "volcengine" | "azure"
+export type TtsProvider = "voxcpm" | "azure"
 
 export type TaskStage = {
   task_id: string
@@ -120,6 +120,7 @@ export type Task = {
   bilibili_tid?: number
   bilibili_auto_publish?: boolean
   bilibili_generate_meta?: boolean
+  pause_requested?: boolean
   stages: TaskStage[]
 }
 
@@ -150,24 +151,10 @@ export type OutputSettings = {
   output_dir: string
 }
 
-export type VolcengineTtsSettings = {
-  app_id: string
-  access_key: string
-  has_access_key: boolean
-  api_key: string
-  has_api_key: boolean
-  resource_id: string
-  speaker: string
-  endpoint: string
-  sample_rate: string
-  speech_rate: string
-  concurrency: string
-  uid: string
-}
-
 export type AzureTtsSettings = {
   subscription_key: string
   has_subscription_key: boolean
+  key_count: number
   region: string
   voice: string
   locale: string
@@ -387,6 +374,10 @@ export function continueTask(taskId: string, executionMode?: ExecutionMode) {
   })
 }
 
+export function pauseTask(taskId: string) {
+  return request<Task>(`/api/tasks/${taskId}/pause`, { method: "POST" })
+}
+
 export function redoStage(taskId: string, stageName: string) {
   return request<Task>(`/api/tasks/${taskId}/stages/${stageName}/redo`, { method: "POST" })
 }
@@ -478,6 +469,8 @@ export type TaskPackage = {
   item_count?: number
   succeeded_count?: number
   failed_count?: number
+  retried_count?: number
+  pause_requested?: boolean
   items?: TaskPackageItem[]
 }
 
@@ -514,8 +507,8 @@ export function createTaskPackage(payload: {
   })
 }
 
-export function listTaskPackages(limit = 20) {
-  return request<{ packages: TaskPackage[] }>(`/api/task-packages?limit=${limit}`)
+export function listTaskPackages(limit = 20, signal?: AbortSignal) {
+  return request<{ packages: TaskPackage[] }>(`/api/task-packages?limit=${limit}`, { signal })
 }
 
 export function getTaskPackage(id: string, signal?: AbortSignal) {
@@ -529,6 +522,10 @@ export function continueTaskPackage(id: string, executionMode?: ExecutionMode) {
   })
 }
 
+export function pauseTaskPackage(id: string) {
+  return request<TaskPackage>(`/api/task-packages/${id}/pause`, { method: "POST" })
+}
+
 export function retryFailedTaskPackage(id: string) {
   return request<TaskPackage>(`/api/task-packages/${id}/retry-failed`, {
     method: "POST",
@@ -539,6 +536,34 @@ export function retryFailedTaskPackage(id: string) {
 export function deleteTaskPackage(id: string) {
   return request<{ deleted: boolean; id: string }>(`/api/task-packages/${id}`, {
     method: "DELETE",
+  })
+}
+
+export type BatchPackageRetryResult = {
+  retried: string[]
+  skipped: { id: string; reason: string }[]
+  missing: string[]
+  failed: { id: string; reason: string }[]
+}
+
+export function deletePackagesBatch(packageIds: string[]) {
+  return request<BatchDeleteResult>("/api/task-packages/batch-delete", {
+    method: "POST",
+    body: JSON.stringify({ package_ids: packageIds }),
+  })
+}
+
+export function cleanupPackagesBatch(packageIds: string[]) {
+  return request<BatchCleanupResult>("/api/task-packages/batch-cleanup-files", {
+    method: "POST",
+    body: JSON.stringify({ package_ids: packageIds }),
+  })
+}
+
+export function retryFailedPackagesBatch(packageIds: string[]) {
+  return request<BatchPackageRetryResult>("/api/task-packages/batch-retry-failed", {
+    method: "POST",
+    body: JSON.stringify({ package_ids: packageIds }),
   })
 }
 
@@ -751,29 +776,7 @@ export function saveOutputSettings(settings: OutputSettings) {
   })
 }
 
-export function getVolcengineTtsSettings() {
-  return request<VolcengineTtsSettings>("/api/settings/volcengine-tts")
-}
 
-export function saveVolcengineTtsSettings(settings: {
-  app_id: string
-  access_key: string
-  clear_access_key?: boolean
-  api_key: string
-  clear_api_key?: boolean
-  resource_id: string
-  speaker: string
-  endpoint: string
-  sample_rate: string
-  speech_rate: string
-  concurrency: string
-  uid: string
-}) {
-  return request<VolcengineTtsSettings>("/api/settings/volcengine-tts", {
-    method: "POST",
-    body: JSON.stringify(settings),
-  })
-}
 
 export function getAzureTtsSettings() {
   return request<AzureTtsSettings>("/api/settings/azure-tts")
@@ -802,6 +805,34 @@ export function getAzureTtsVoices(settings: {
   endpoint: string
 }) {
   return request<AzureTtsVoices>("/api/settings/azure-tts/voices", {
+    method: "POST",
+    body: JSON.stringify(settings),
+  })
+}
+
+export type AzureTtsKeyValidationItem = {
+  index: number
+  label: string
+  ok: boolean
+  status_code: number | null
+  voice_count?: number
+  detail: string
+}
+
+export type AzureTtsKeyValidation = {
+  ok: boolean
+  total: number
+  ok_count: number
+  failed_count: number
+  results: AzureTtsKeyValidationItem[]
+}
+
+export function validateAzureTtsKeys(settings: {
+  region: string
+  subscription_key: string
+  endpoint: string
+}) {
+  return request<AzureTtsKeyValidation>("/api/settings/azure-tts/validate-keys", {
     method: "POST",
     body: JSON.stringify(settings),
   })

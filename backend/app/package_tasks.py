@@ -5,7 +5,6 @@ from fnmatch import fnmatch
 from pathlib import Path
 
 from . import config
-from .adapters.export_video import resolve_chinese_subtitle
 from .config import package_allowed_roots, package_max_items
 
 DEFAULT_VIDEO_GLOBS = ("*.mp4", "*.mov", "*.mkv", "*.m4v", "*.webm", "*.avi", "*.flv", "*.wmv")
@@ -126,20 +125,12 @@ def export_package_item(
     final_video: Path,
     source_path: Path,
     output_suffix: str,
-    export_subtitle: bool,
-    session: Path | None,
-) -> tuple[Path, Path | None]:
+    session: Path | None = None,
+) -> Path:
+    _ = session
     source = source_path.resolve()
     destination = export_destination(source, output_suffix)
     destination = uniquify_destination(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(final_video, destination)
-
-    subtitle_destination: Path | None = None
-    if export_subtitle:
-        subtitle_source = resolve_chinese_subtitle(final_video, session=session)
-        if subtitle_source is not None and subtitle_source.exists():
-            subtitle_destination = destination.with_suffix(".srt")
-            subtitle_destination = uniquify_destination(subtitle_destination)
-            shutil.copy2(subtitle_source, subtitle_destination)
-    return destination, subtitle_destination
+    return destination

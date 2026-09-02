@@ -34,17 +34,99 @@ _LATIN_RE = re.compile(r"[0-9A-Za-z\u00C0-\u024F]")
 _CJK_RE = re.compile(r"[\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]")
 _HANGUL_RE = re.compile(r"[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7AF]")
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
+_KEY_SPLIT_RE = re.compile(r"[\n,;]+")
 _MIN_AUDIO_BYTES = 32
 _REQUEST_ATTEMPTS = 3
 _RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
+_KEY_COOLDOWN_SECONDS = 8.0
 _SILENT_CLIP_MS = 250
 logger = logging.getLogger(__name__)
+
+_pools_lock = threading.Lock()
+_key_pools: dict[tuple[str, ...], "SubscriptionKeyPool"] = {}
 
 
 class AzureTtsError(RuntimeError):
     def __init__(self, message: str, *, retryable: bool = False):
         super().__init__(message)
         self.retryable = retryable
+
+
+class SubscriptionKeyPool:
+    """Round-robin Azure subscription keys with short cooldown after 429/throttle."""
+
+    def __init__(self, keys: list[str]):
+        if not keys:
+            raise ValueError("At least one Azure TTS subscription key is required.")
+        self._keys = list(keys)
+        self._lock = threading.Lock()
+        self._index = 0
+        self._cooldown_until: dict[str, float] = {}
+
+    @property
+    def size(self) -> int:
+        return len(self._keys)
+
+    def acquire(self) -> str:
+        with self._lock:
+            now = time.monotonic()
+            for offset in range(len(self._keys)):
+                idx = (self._index + offset) % len(self._keys)
+                key = self._keys[idx]
+                if self._cooldown_until.get(key, 0.0) <= now:
+                    self._index = (idx + 1) % len(self._keys)
+                    return key
+            # All keys cooling down: pick the one that frees first.
+            key = min(self._keys, key=lambda item: self._cooldown_until.get(item, 0.0))
+            wait_until = self._cooldown_until.get(key, 0.0)
+            self._index = (self._keys.index(key) + 1) % len(self._keys)
+        delay = max(0.0, wait_until - time.monotonic())
+        if delay > 0:
+            time.sleep(min(delay, _KEY_COOLDOWN_SECONDS))
+        return key
+
+    def penalize(self, key: str, *, seconds: float = _KEY_COOLDOWN_SECONDS) -> None:
+        with self._lock:
+            self._cooldown_until[key] = time.monotonic() + max(0.1, seconds)
+
+
+def parse_subscription_keys(raw: str | None) -> list[str]:
+    """Parse one or more Azure keys from newline/comma/semicolon separated text."""
+    keys: list[str] = []
+    seen: set[str] = set()
+    for part in _KEY_SPLIT_RE.split(raw or ""):
+        key = part.strip()
+        if not key or set(key) == {"*"}:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    return keys
+
+
+def _subscription_keys(settings: dict[str, str]) -> list[str]:
+    return parse_subscription_keys(settings.get("subscription_key"))
+
+
+def _get_key_pool(settings: dict[str, str]) -> SubscriptionKeyPool:
+    keys = tuple(_subscription_keys(settings))
+    if not keys:
+        raise RuntimeError(
+            "Azure TTS is not configured. Set one or more subscription keys "
+            "in Settings / environment (one per line)."
+        )
+    with _pools_lock:
+        pool = _key_pools.get(keys)
+        if pool is None:
+            pool = SubscriptionKeyPool(list(keys))
+            _key_pools[keys] = pool
+            # Bound cache size for long-running processes that rotate keys often.
+            if len(_key_pools) > 16:
+                oldest = next(iter(_key_pools))
+                if oldest != keys:
+                    _key_pools.pop(oldest, None)
+        return pool
 
 
 def _tts_text(item: dict) -> str:
@@ -188,14 +270,15 @@ def _concurrency_from(settings: dict[str, str]) -> int:
     return concurrency
 
 
-def _auth_headers(settings: dict[str, str], *, output_format: str) -> dict[str, str]:
-    subscription_key = (settings.get("subscription_key") or "").strip()
-    if not subscription_key:
+def _auth_headers(subscription_key: str, *, output_format: str) -> dict[str, str]:
+    key = (subscription_key or "").strip()
+    if not key:
         raise RuntimeError(
-            "Azure TTS is not configured. Set subscription_key in Settings / environment."
+            "Azure TTS is not configured. Set one or more subscription keys "
+            "in Settings / environment (one per line)."
         )
     return {
-        "Ocp-Apim-Subscription-Key": subscription_key,
+        "Ocp-Apim-Subscription-Key": key,
         "Content-Type": "application/ssml+xml",
         "X-Microsoft-OutputFormat": output_format,
         "User-Agent": _USER_AGENT,
@@ -203,17 +286,18 @@ def _auth_headers(settings: dict[str, str], *, output_format: str) -> dict[str, 
 
 
 def list_voices(*, region: str = "", subscription_key: str = "", endpoint: str = "") -> list[str]:
+    keys = parse_subscription_keys(subscription_key)
+    if not keys:
+        raise ValueError("Azure TTS subscription key is not configured.")
     settings = {
         "region": region,
-        "subscription_key": subscription_key,
+        "subscription_key": keys[0],
         "endpoint": endpoint,
     }
     headers = {
-        "Ocp-Apim-Subscription-Key": (subscription_key or "").strip(),
+        "Ocp-Apim-Subscription-Key": keys[0],
         "User-Agent": _USER_AGENT,
     }
-    if not headers["Ocp-Apim-Subscription-Key"]:
-        raise ValueError("Azure TTS subscription key is not configured.")
     url = resolve_voices_endpoint(settings)
     with httpx.Client(timeout=60.0) as client:
         response = client.get(url, headers=headers)
@@ -230,6 +314,85 @@ def list_voices(*, region: str = "", subscription_key: str = "", endpoint: str =
                 seen.add(short_name)
                 voices.append(short_name)
     return voices
+
+
+def _mask_key_label(key: str, index: int) -> str:
+    cleaned = key.strip()
+    if len(cleaned) <= 8:
+        return f"#{index}"
+    return f"#{index} …{cleaned[-4:]}"
+
+
+def validate_subscription_keys(
+    *,
+    region: str = "",
+    subscription_key: str = "",
+    endpoint: str = "",
+) -> dict[str, object]:
+    """Probe each key against Azure voices/list. Does not synthesize audio."""
+    keys = parse_subscription_keys(subscription_key)
+    if not keys:
+        raise ValueError("Azure TTS subscription key is not configured.")
+    settings = {
+        "region": region,
+        "endpoint": endpoint,
+        "subscription_key": keys[0],
+    }
+    url = resolve_voices_endpoint(settings)
+    results: list[dict[str, object]] = []
+    with httpx.Client(timeout=30.0) as client:
+        for index, key in enumerate(keys, start=1):
+            label = _mask_key_label(key, index)
+            try:
+                response = client.get(
+                    url,
+                    headers={
+                        "Ocp-Apim-Subscription-Key": key,
+                        "User-Agent": _USER_AGENT,
+                    },
+                )
+                if response.status_code >= 400:
+                    detail = _response_detail(response)
+                    results.append(
+                        {
+                            "index": index,
+                            "label": label,
+                            "ok": False,
+                            "status_code": response.status_code,
+                            "detail": detail,
+                        }
+                    )
+                    continue
+                payload = response.json()
+                voice_count = len(payload) if isinstance(payload, list) else 0
+                results.append(
+                    {
+                        "index": index,
+                        "label": label,
+                        "ok": True,
+                        "status_code": response.status_code,
+                        "voice_count": voice_count,
+                        "detail": f"ok ({voice_count} voices)",
+                    }
+                )
+            except Exception as exc:
+                results.append(
+                    {
+                        "index": index,
+                        "label": label,
+                        "ok": False,
+                        "status_code": None,
+                        "detail": str(exc).strip() or type(exc).__name__,
+                    }
+                )
+    ok_count = sum(1 for item in results if item.get("ok"))
+    return {
+        "ok": ok_count == len(results),
+        "total": len(results),
+        "ok_count": ok_count,
+        "failed_count": len(results) - ok_count,
+        "results": results,
+    }
 
 
 def _response_detail(response: httpx.Response) -> str:
@@ -269,13 +432,17 @@ def _request_speech_once(text: str, settings: dict[str, str]) -> AudioSegment:
     speech_rate = settings.get("speech_rate") or DEFAULT_SPEECH_RATE
     ssml = build_ssml(text, voice=voice, locale=locale, speech_rate=speech_rate)
     endpoint = resolve_endpoint(settings)
-    headers = _auth_headers(settings, output_format=output_format)
+    pool = _get_key_pool(settings)
+    subscription_key = pool.acquire()
+    headers = _auth_headers(subscription_key, output_format=output_format)
 
     with httpx.Client(timeout=120.0) as client:
         response = client.post(endpoint, headers=headers, content=ssml.encode("utf-8"))
         content_type = (response.headers.get("content-type") or "").lower()
         if response.status_code >= 400:
             detail = _response_detail(response)
+            if response.status_code == 429:
+                pool.penalize(subscription_key)
             raise AzureTtsError(
                 f"Azure TTS failed ({detail})",
                 retryable=response.status_code in _RETRY_STATUSES,
@@ -385,6 +552,9 @@ def generate_tts(
 
     resolved = settings or database.get_azure_tts_settings()
     concurrency = _concurrency_from(resolved)
+    key_count = len(_subscription_keys(resolved))
+    # Warm the shared key pool before workers start.
+    _get_key_pool(resolved)
     pending: list[tuple[int, dict]] = []
     completed = 0
     for index, item in enumerate(items, start=1):
@@ -410,6 +580,10 @@ def generate_tts(
         audio = synthesize_speech(_tts_text(item), resolved)
         audio.export(output_dir / f"{index:04d}.wav", format="wav")
 
+    worker_note = f"x{concurrency}"
+    if key_count > 1:
+        worker_note = f"x{concurrency}, {key_count} keys"
+
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = {
             pool.submit(synthesize_one, index, item): index for index, item in pending
@@ -423,7 +597,7 @@ def generate_tts(
                 progress = round(completed / total * 100)
                 progress_callback(
                     progress,
-                    f"Prepared {completed}/{total} Azure TTS clips (x{concurrency})",
+                    f"Prepared {completed}/{total} Azure TTS clips ({worker_note})",
                 )
 
     return output_dir

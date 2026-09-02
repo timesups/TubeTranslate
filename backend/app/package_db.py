@@ -29,7 +29,7 @@ def init_package_tables(conn) -> None:
           status TEXT NOT NULL,
           source_root TEXT NOT NULL,
           output_suffix TEXT NOT NULL,
-          export_subtitle INTEGER NOT NULL DEFAULT 1,
+          export_subtitle INTEGER NOT NULL DEFAULT 0,
           direction TEXT NOT NULL,
           execution_mode TEXT NOT NULL DEFAULT 'auto',
           audio_mode TEXT NOT NULL DEFAULT 'replace',
@@ -80,6 +80,11 @@ def init_package_tables(conn) -> None:
         ON task_package_items(package_id, sort_index);
         """
     )
+    package_columns = {row["name"] for row in conn.execute("PRAGMA table_info(task_packages)").fetchall()}
+    if "pause_requested" not in package_columns:
+        conn.execute(
+            "ALTER TABLE task_packages ADD COLUMN pause_requested INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def log_path(package_id: str) -> Path:
@@ -178,8 +183,23 @@ def get_package(package_id: str) -> dict[str, Any] | None:
             """,
             (package_id,),
         ).fetchall()
+        counts = conn.execute(
+            """
+            SELECT
+              COUNT(*) AS item_count,
+              SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded_count,
+              SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count
+            FROM task_package_items
+            WHERE package_id = ?
+            """,
+            (package_id,),
+        ).fetchone()
     package = _serialize_package(dict(row))
     package["items"] = [_serialize_item_with_stages(dict(item)) for item in items]
+    if counts is not None:
+        package["item_count"] = int(counts["item_count"] or 0)
+        package["succeeded_count"] = int(counts["succeeded_count"] or 0)
+        package["failed_count"] = int(counts["failed_count"] or 0)
     return package
 
 
@@ -243,29 +263,92 @@ def queue_package_for_continue(package_id: str) -> None:
         conn.execute(
             """
             UPDATE task_packages
-            SET status = 'queued', error_message = NULL, completed_at = NULL
+            SET status = 'queued', error_message = NULL, completed_at = NULL, pause_requested = 0
             WHERE id = ?
             """,
             (package_id,),
         )
 
 
-def reset_failed_package_items(package_id: str) -> int:
+def apply_package_pause(package_id: str, *, item_id: str | None = None) -> None:
     with connect() as conn:
-        cursor = conn.execute(
+        conn.execute(
             """
-            UPDATE task_package_items
-            SET status = 'pending', current_stage = NULL, error_message = NULL,
-                started_at = NULL, completed_at = NULL
-            WHERE package_id = ? AND status = 'failed'
+            UPDATE task_packages
+            SET status = 'paused', pause_requested = 0
+            WHERE id = ?
             """,
             (package_id,),
         )
+        if item_id:
+            conn.execute(
+                """
+                UPDATE task_package_items
+                SET status = 'paused'
+                WHERE id = ? AND status = 'running'
+                """,
+                (item_id,),
+            )
+
+
+def request_package_pause(package_id: str) -> bool:
+    package = get_package(package_id)
+    if not package or package["status"] not in ("queued", "running"):
+        return False
+    if package["status"] == "queued":
+        apply_package_pause(package_id)
+        return True
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE task_packages
+            SET pause_requested = 1
+            WHERE id = ? AND status = 'running'
+            """,
+            (package_id,),
+        )
+    return cursor.rowcount > 0
+
+
+def raise_if_package_pause_requested(package_id: str, *, item_id: str | None = None) -> None:
+    from .database import PauseRequested
+
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT pause_requested FROM task_packages WHERE id = ?",
+            (package_id,),
+        ).fetchone()
+    if row and row["pause_requested"]:
+        apply_package_pause(package_id, item_id=item_id)
+        raise PauseRequested()
+
+
+def reset_failed_package_items(package_id: str) -> int:
+    with connect() as conn:
         failed_items = conn.execute(
-            "SELECT id FROM task_package_items WHERE package_id = ? AND status = 'pending'",
+            """
+            SELECT id FROM task_package_items
+            WHERE package_id = ? AND status = 'failed'
+            """,
             (package_id,),
         ).fetchall()
-        for row in failed_items:
+        if not failed_items:
+            return 0
+
+        item_ids = [str(row["id"]) for row in failed_items]
+        placeholders = ", ".join("?" for _ in item_ids)
+        conn.execute(
+            f"""
+            UPDATE task_package_items
+            SET status = 'pending', current_stage = NULL, error_message = NULL,
+                started_at = NULL, completed_at = NULL,
+                final_video_path = NULL, exported_video_path = NULL,
+                exported_subtitle_path = NULL
+            WHERE package_id = ? AND id IN ({placeholders})
+            """,
+            (package_id, *item_ids),
+        )
+        for item_id in item_ids:
             conn.execute(
                 """
                 UPDATE task_package_item_stages
@@ -273,17 +356,26 @@ def reset_failed_package_items(package_id: str) -> int:
                     progress = NULL, last_message = NULL, error_message = NULL
                 WHERE item_id = ? AND status IN ('failed', 'running')
                 """,
-                (row["id"],),
+                (item_id,),
             )
         conn.execute(
             """
             UPDATE task_packages
-            SET status = 'queued', error_message = NULL, completed_at = NULL
+            SET status = 'queued', error_message = NULL, completed_at = NULL, pause_requested = 0
             WHERE id = ?
             """,
             (package_id,),
         )
-    return cursor.rowcount
+    return len(item_ids)
+
+
+def package_exists(package_id: str) -> bool:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM task_packages WHERE id = ?",
+            (package_id,),
+        ).fetchone()
+    return row is not None
 
 
 def delete_package(package_id: str) -> bool:
@@ -341,6 +433,8 @@ def _serialize_package(data: dict[str, Any]) -> dict[str, Any]:
         data["continue_on_error"] = bool(data["continue_on_error"])
     if "skip_if_export_exists" in data:
         data["skip_if_export_exists"] = bool(data["skip_if_export_exists"])
+    if "pause_requested" in data:
+        data["pause_requested"] = bool(data["pause_requested"])
     return data
 
 

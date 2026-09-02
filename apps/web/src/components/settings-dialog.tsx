@@ -11,14 +11,13 @@ import {
   getOpenAIModels,
   getOpenAISettings,
   getOutputSettings,
-  getVolcengineTtsSettings,
   getYtdlpSettings,
   saveAzureTtsSettings,
   saveCookie,
   saveOpenAISettings,
   saveOutputSettings,
-  saveVolcengineTtsSettings,
   saveYtdlpSettings,
+  validateAzureTtsKeys,
 } from "@/lib/api"
 import { LANGUAGE_OPTIONS, useI18n } from "@/lib/i18n"
 import { BilibiliSettingsPanel } from "@/components/bilibili-settings-panel"
@@ -51,16 +50,6 @@ type SettingsForm = {
   translateConcurrency: string
   proxyPort: string
   outputDir: string
-  volcAppId: string
-  volcAccessKey: string
-  volcApiKey: string
-  volcResourceId: string
-  volcSpeaker: string
-  volcEndpoint: string
-  volcSampleRate: string
-  volcSpeechRate: string
-  volcConcurrency: string
-  volcUid: string
   azureSubscriptionKey: string
   azureRegion: string
   azureVoice: string
@@ -75,7 +64,7 @@ const SAVED_API_KEY_MASK = "********"
 const SAVED_COOKIE_SENTINEL = "__YOUDUB_SAVED_COOKIE__"
 
 type MessageKey = "keySaved"
-type SaveSection = "cookie" | "openai" | "ytdlp" | "output" | "volcengine" | "azure"
+type SaveSection = "cookie" | "openai" | "ytdlp" | "output" | "azure"
 type SaveResult = {
   section: SaveSection
   status: "saved" | "failed" | "unchanged"
@@ -90,16 +79,6 @@ const defaultSettings: SettingsForm = {
   translateConcurrency: "8",
   proxyPort: "",
   outputDir: "",
-  volcAppId: "",
-  volcAccessKey: "",
-  volcApiKey: "",
-  volcResourceId: "seed-tts-2.0",
-  volcSpeaker: "zh_female_shuangkuaisisi_moon_bigtts",
-  volcEndpoint: "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
-  volcSampleRate: "24000",
-  volcSpeechRate: "0",
-  volcConcurrency: "4",
-  volcUid: "youdub-webui",
   azureSubscriptionKey: "",
   azureRegion: "eastasia",
   azureVoice: "zh-CN-XiaoxiaoNeural",
@@ -124,17 +103,17 @@ export function SettingsDialog() {
   const [modelsLoaded, setModelsLoaded] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
-  const [showVolcAccessKey, setShowVolcAccessKey] = useState(false)
-  const [showVolcApiKey, setShowVolcApiKey] = useState(false)
   const [showAzureKey, setShowAzureKey] = useState(false)
   const [cookieDirty, setCookieDirty] = useState(false)
   const [apiKeyDirty, setApiKeyDirty] = useState(false)
-  const [volcAccessKeyDirty, setVolcAccessKeyDirty] = useState(false)
-  const [volcApiKeyDirty, setVolcApiKeyDirty] = useState(false)
   const [azureKeyDirty, setAzureKeyDirty] = useState(false)
+  const [azureKeyCount, setAzureKeyCount] = useState(0)
   const [azureVoiceOptions, setAzureVoiceOptions] = useState<string[]>([])
   const [azureVoicesLoaded, setAzureVoicesLoaded] = useState(false)
   const [azureVoicesLoading, setAzureVoicesLoading] = useState(false)
+  const [azureKeysValidating, setAzureKeysValidating] = useState(false)
+  const [azureKeyValidationMessage, setAzureKeyValidationMessage] = useState("")
+  const [azureKeyValidationOk, setAzureKeyValidationOk] = useState<boolean | null>(null)
   const [saveResults, setSaveResults] = useState<SaveResult[]>([])
   const [saving, setSaving] = useState(false)
 
@@ -149,10 +128,9 @@ export function SettingsDialog() {
       getOpenAISettings(),
       getYtdlpSettings(),
       getOutputSettings(),
-      getVolcengineTtsSettings(),
       getAzureTtsSettings(),
     ])
-      .then(([cookie, openai, ytdlp, output, volc, azure]) => {
+      .then(([cookie, openai, ytdlp, output, azure]) => {
         setSettings({
           cookie: cookie.exists ? SAVED_COOKIE_SENTINEL : "",
           baseUrl: openai.base_url,
@@ -161,19 +139,7 @@ export function SettingsDialog() {
           translateConcurrency: openai.translate_concurrency || "8",
           proxyPort: ytdlp.proxy_port,
           outputDir: output.output_dir,
-          volcAppId: volc.app_id,
-          volcAccessKey: volc.has_access_key ? volc.access_key || SAVED_API_KEY_MASK : "",
-          volcApiKey: volc.has_api_key ? volc.api_key || SAVED_API_KEY_MASK : "",
-          volcResourceId: volc.resource_id,
-          volcSpeaker: volc.speaker,
-          volcEndpoint: volc.endpoint,
-          volcSampleRate: volc.sample_rate,
-          volcSpeechRate: volc.speech_rate,
-          volcConcurrency: volc.concurrency || "4",
-          volcUid: volc.uid,
-          azureSubscriptionKey: azure.has_subscription_key
-            ? azure.subscription_key || SAVED_API_KEY_MASK
-            : "",
+          azureSubscriptionKey: "",
           azureRegion: azure.region,
           azureVoice: azure.voice,
           azureLocale: azure.locale,
@@ -184,17 +150,16 @@ export function SettingsDialog() {
         })
         setModelOptions(uniqueModels([openai.model]))
         setAzureVoiceOptions(uniqueModels([azure.voice]))
+        setAzureKeyCount(azure.key_count || (azure.has_subscription_key ? 1 : 0))
         setModelsLoaded(false)
         setAzureVoicesLoaded(false)
         setShowApiKey(false)
-        setShowVolcAccessKey(false)
-        setShowVolcApiKey(false)
         setShowAzureKey(false)
         setCookieDirty(false)
         setApiKeyDirty(false)
-        setVolcAccessKeyDirty(false)
-        setVolcApiKeyDirty(false)
         setAzureKeyDirty(false)
+        setAzureKeyValidationMessage("")
+        setAzureKeyValidationOk(null)
         setSaveResults([])
         setMessage("")
         setMessageKey(openai.has_api_key ? "keySaved" : null)
@@ -206,13 +171,12 @@ export function SettingsDialog() {
   }, [open])
 
   async function refreshSettingsFromServer() {
-    const [cookieResult, openaiResult, ytdlpResult, outputResult, volcResult, azureResult] =
+    const [cookieResult, openaiResult, ytdlpResult, outputResult, azureResult] =
       await Promise.allSettled([
         getCookieInfo(),
         getOpenAISettings(),
         getYtdlpSettings(),
         getOutputSettings(),
-        getVolcengineTtsSettings(),
         getAzureTtsSettings(),
       ])
 
@@ -234,24 +198,9 @@ export function SettingsDialog() {
       if (outputResult.status === "fulfilled") {
         refreshed.outputDir = outputResult.value.output_dir
       }
-      if (volcResult.status === "fulfilled") {
-        const volc = volcResult.value
-        refreshed.volcAppId = volc.app_id
-        refreshed.volcAccessKey = volc.has_access_key ? volc.access_key || SAVED_API_KEY_MASK : ""
-        refreshed.volcApiKey = volc.has_api_key ? volc.api_key || SAVED_API_KEY_MASK : ""
-        refreshed.volcResourceId = volc.resource_id
-        refreshed.volcSpeaker = volc.speaker
-        refreshed.volcEndpoint = volc.endpoint
-        refreshed.volcSampleRate = volc.sample_rate
-        refreshed.volcSpeechRate = volc.speech_rate
-        refreshed.volcConcurrency = volc.concurrency || "4"
-        refreshed.volcUid = volc.uid
-      }
       if (azureResult.status === "fulfilled") {
         const azure = azureResult.value
-        refreshed.azureSubscriptionKey = azure.has_subscription_key
-          ? azure.subscription_key || SAVED_API_KEY_MASK
-          : ""
+        refreshed.azureSubscriptionKey = ""
         refreshed.azureRegion = azure.region
         refreshed.azureVoice = azure.voice
         refreshed.azureLocale = azure.locale
@@ -270,20 +219,17 @@ export function SettingsDialog() {
       setModelOptions(uniqueModels([openaiResult.value.model]))
       setModelsLoaded(false)
     }
-    if (volcResult.status === "fulfilled") {
-      setVolcAccessKeyDirty(false)
-      setVolcApiKeyDirty(false)
-      setShowVolcAccessKey(false)
-      setShowVolcApiKey(false)
-    }
     if (azureResult.status === "fulfilled") {
       setAzureKeyDirty(false)
       setShowAzureKey(false)
+      setAzureKeyCount(
+        azureResult.value.key_count || (azureResult.value.has_subscription_key ? 1 : 0),
+      )
       setAzureVoiceOptions(uniqueModels([azureResult.value.voice]))
       setAzureVoicesLoaded(false)
     }
 
-    return [cookieResult, openaiResult, ytdlpResult, outputResult, volcResult, azureResult].every(
+    return [cookieResult, openaiResult, ytdlpResult, outputResult, azureResult].every(
       (result) => result.status === "fulfilled",
     )
   }
@@ -325,22 +271,6 @@ export function SettingsDialog() {
       }))
       await saveSection("ytdlp", () => saveYtdlpSettings({ proxy_port: settings.proxyPort }))
       await saveSection("output", () => saveOutputSettings({ output_dir: settings.outputDir }))
-      const clearVolcAccessKey = volcAccessKeyDirty && !settings.volcAccessKey.trim()
-      const clearVolcApiKey = volcApiKeyDirty && !settings.volcApiKey.trim()
-      await saveSection("volcengine", () => saveVolcengineTtsSettings({
-        app_id: settings.volcAppId,
-        access_key: volcAccessKeyDirty ? settings.volcAccessKey : "",
-        clear_access_key: clearVolcAccessKey,
-        api_key: volcApiKeyDirty ? settings.volcApiKey : "",
-        clear_api_key: clearVolcApiKey,
-        resource_id: settings.volcResourceId,
-        speaker: settings.volcSpeaker,
-        endpoint: settings.volcEndpoint,
-        sample_rate: settings.volcSampleRate,
-        speech_rate: settings.volcSpeechRate,
-        concurrency: settings.volcConcurrency,
-        uid: settings.volcUid,
-      }))
       const clearAzureKey = azureKeyDirty && !settings.azureSubscriptionKey.trim()
       await saveSection("azure", () => saveAzureTtsSettings({
         subscription_key: azureKeyDirty ? settings.azureSubscriptionKey : "",
@@ -358,18 +288,12 @@ export function SettingsDialog() {
         ...current,
         cookie: cookieDirty ? "" : current.cookie,
         apiKey: apiKeyDirty ? "" : current.apiKey,
-        volcAccessKey: volcAccessKeyDirty ? "" : current.volcAccessKey,
-        volcApiKey: volcApiKeyDirty ? "" : current.volcApiKey,
         azureSubscriptionKey: azureKeyDirty ? "" : current.azureSubscriptionKey,
       }))
       if (cookieDirty) setCookieDirty(false)
       if (apiKeyDirty) setApiKeyDirty(false)
-      if (volcAccessKeyDirty) setVolcAccessKeyDirty(false)
-      if (volcApiKeyDirty) setVolcApiKeyDirty(false)
       if (azureKeyDirty) setAzureKeyDirty(false)
       setShowApiKey(false)
-      setShowVolcAccessKey(false)
-      setShowVolcApiKey(false)
       setShowAzureKey(false)
 
       const refreshed = await refreshSettingsFromServer()
@@ -440,12 +364,45 @@ export function SettingsDialog() {
     }
   }
 
+  async function validateAzureKeys() {
+    setMessage("")
+    setMessageKey(null)
+    setAzureKeyValidationMessage("")
+    setAzureKeyValidationOk(null)
+    setAzureKeysValidating(true)
+    try {
+      const result = await validateAzureTtsKeys({
+        region: settings.azureRegion,
+        subscription_key: azureKeyDirty ? settings.azureSubscriptionKey : "",
+        endpoint: settings.azureEndpoint,
+      })
+      const summary = result.ok
+        ? t.settings.azureValidateKeysOk.replace("{count}", String(result.total))
+        : t.settings.azureValidateKeysPartial
+            .replace("{ok}", String(result.ok_count))
+            .replace("{total}", String(result.total))
+            .replace("{failed}", String(result.failed_count))
+      const details = result.results
+        .map((item) => `${item.label}: ${item.ok ? "OK" : item.detail}`)
+        .join("\n")
+      setAzureKeyValidationOk(result.ok)
+      setAzureKeyValidationMessage(`${summary}\n${details}`)
+      setMessage(summary)
+    } catch (err) {
+      setAzureKeyValidationOk(false)
+      const detail = err instanceof Error ? err.message : t.settings.azureValidateKeysError
+      setAzureKeyValidationMessage(detail)
+      setMessage(detail)
+    } finally {
+      setAzureKeysValidating(false)
+    }
+  }
+
   const saveSectionLabels: Record<SaveSection, string> = {
     cookie: t.settings.cookie,
     openai: t.settings.openaiSaveSection,
     ytdlp: t.settings.ytdlpSaveSection,
     output: t.settings.outputSaveSection,
-    volcengine: t.settings.volcengineSaveSection,
     azure: t.settings.azureSaveSection,
   }
 
@@ -645,216 +602,29 @@ export function SettingsDialog() {
 
               <div className="grid gap-3 rounded-lg border border-border/60 p-3">
                 <div className="grid gap-1">
-                  <p className="text-sm font-medium">{t.settings.volcengineSection}</p>
-                  <p className="text-xs text-muted-foreground">{t.settings.volcengineHelp}</p>
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="volcApiKey">{t.settings.volcengineApiKey}</Label>
-                  <div className="relative">
-                    <Input
-                      id="volcApiKey"
-                      type={showVolcApiKey ? "text" : "password"}
-                      value={settings.volcApiKey}
-                      onFocus={(event) => {
-                        if (!volcApiKeyDirty && settings.volcApiKey === SAVED_API_KEY_MASK) {
-                          event.currentTarget.select()
-                        }
-                      }}
-                      onChange={(event) => {
-                        setVolcApiKeyDirty(true)
-                        setSettings((current) => ({
-                          ...current,
-                          volcApiKey: event.target.value.replace(SAVED_API_KEY_MASK, ""),
-                        }))
-                      }}
-                      placeholder={t.settings.volcengineApiKeyPlaceholder}
-                      className="pr-9"
-                    />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      className="absolute top-0.5 right-0.5"
-                      onClick={() => setShowVolcApiKey((current) => !current)}
-                    >
-                      {showVolcApiKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                      <span className="sr-only">
-                        {showVolcApiKey ? t.settings.hideApiKey : t.settings.showApiKey}
-                      </span>
-                    </Button>
-                  </div>
-                </div>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <div className="grid gap-2">
-                    <Label htmlFor="volcAppId">{t.settings.volcengineAppId}</Label>
-                    <Input
-                      id="volcAppId"
-                      value={settings.volcAppId}
-                      onChange={(event) =>
-                        setSettings((current) => ({ ...current, volcAppId: event.target.value }))
-                      }
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="volcAccessKey">{t.settings.volcengineAccessKey}</Label>
-                    <div className="relative">
-                      <Input
-                        id="volcAccessKey"
-                        type={showVolcAccessKey ? "text" : "password"}
-                        value={settings.volcAccessKey}
-                        onFocus={(event) => {
-                          if (!volcAccessKeyDirty && settings.volcAccessKey === SAVED_API_KEY_MASK) {
-                            event.currentTarget.select()
-                          }
-                        }}
-                        onChange={(event) => {
-                          setVolcAccessKeyDirty(true)
-                          setSettings((current) => ({
-                            ...current,
-                            volcAccessKey: event.target.value.replace(SAVED_API_KEY_MASK, ""),
-                          }))
-                        }}
-                        placeholder={t.settings.volcengineApiKeyPlaceholder}
-                        className="pr-9"
-                      />
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        className="absolute top-0.5 right-0.5"
-                        onClick={() => setShowVolcAccessKey((current) => !current)}
-                      >
-                        {showVolcAccessKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                        <span className="sr-only">
-                          {showVolcAccessKey ? t.settings.hideApiKey : t.settings.showApiKey}
-                        </span>
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <div className="grid gap-2">
-                    <Label htmlFor="volcResourceId">{t.settings.volcengineResourceId}</Label>
-                    <Input
-                      id="volcResourceId"
-                      value={settings.volcResourceId}
-                      onChange={(event) =>
-                        setSettings((current) => ({
-                          ...current,
-                          volcResourceId: event.target.value,
-                        }))
-                      }
-                      placeholder="seed-tts-2.0"
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="volcSpeaker">{t.settings.volcengineSpeaker}</Label>
-                    <Input
-                      id="volcSpeaker"
-                      value={settings.volcSpeaker}
-                      onChange={(event) =>
-                        setSettings((current) => ({ ...current, volcSpeaker: event.target.value }))
-                      }
-                    />
-                  </div>
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="volcEndpoint">{t.settings.volcengineEndpoint}</Label>
-                  <Input
-                    id="volcEndpoint"
-                    value={settings.volcEndpoint}
-                    onChange={(event) =>
-                      setSettings((current) => ({ ...current, volcEndpoint: event.target.value }))
-                    }
-                  />
-                </div>
-                <div className="grid gap-2 sm:grid-cols-3">
-                  <div className="grid gap-2">
-                    <Label htmlFor="volcSampleRate">{t.settings.volcengineSampleRate}</Label>
-                    <Input
-                      id="volcSampleRate"
-                      inputMode="numeric"
-                      value={settings.volcSampleRate}
-                      onChange={(event) =>
-                        setSettings((current) => ({
-                          ...current,
-                          volcSampleRate: event.target.value.replace(/[^0-9]/g, ""),
-                        }))
-                      }
-                      placeholder="24000"
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="volcSpeechRate">{t.settings.volcengineSpeechRate}</Label>
-                    <Input
-                      id="volcSpeechRate"
-                      value={settings.volcSpeechRate}
-                      onChange={(event) =>
-                        setSettings((current) => ({
-                          ...current,
-                          volcSpeechRate: event.target.value.replace(/[^0-9-]/g, ""),
-                        }))
-                      }
-                      placeholder="0"
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="volcUid">{t.settings.volcengineUid}</Label>
-                    <Input
-                      id="volcUid"
-                      value={settings.volcUid}
-                      onChange={(event) =>
-                        setSettings((current) => ({ ...current, volcUid: event.target.value }))
-                      }
-                    />
-                  </div>
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="volcConcurrency">{t.settings.volcengineConcurrency}</Label>
-                  <Input
-                    id="volcConcurrency"
-                    inputMode="numeric"
-                    value={settings.volcConcurrency}
-                    onChange={(event) =>
-                      setSettings((current) => ({
-                        ...current,
-                        volcConcurrency: event.target.value.replace(/[^0-9]/g, ""),
-                      }))
-                    }
-                    placeholder="4"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {t.settings.volcengineConcurrencyHelp}
-                  </p>
-                </div>
-              </div>
-
-              <div className="grid gap-3 rounded-lg border border-border/60 p-3">
-                <div className="grid gap-1">
                   <p className="text-sm font-medium">{t.settings.azureSection}</p>
                   <p className="text-xs text-muted-foreground">{t.settings.azureHelp}</p>
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="azureSubscriptionKey">{t.settings.azureSubscriptionKey}</Label>
                   <div className="relative">
-                    <Input
+                    <Textarea
                       id="azureSubscriptionKey"
-                      type={showAzureKey ? "text" : "password"}
+                      rows={3}
                       value={settings.azureSubscriptionKey}
-                      onFocus={(event) => {
-                        if (!azureKeyDirty && settings.azureSubscriptionKey === SAVED_API_KEY_MASK) {
-                          event.currentTarget.select()
-                        }
-                      }}
                       onChange={(event) => {
                         setAzureKeyDirty(true)
                         setSettings((current) => ({
                           ...current,
-                          azureSubscriptionKey: event.target.value.replace(SAVED_API_KEY_MASK, ""),
+                          azureSubscriptionKey: event.target.value,
                         }))
                       }}
+                      onKeyDown={(event) => {
+                        // Keep Enter as newline; never let it bubble as dialog/form activation.
+                        if (event.key === "Enter") event.stopPropagation()
+                      }}
                       placeholder={t.settings.azureSubscriptionKeyPlaceholder}
-                      className="pr-9"
+                      className="pr-9 font-mono text-xs"
                     />
                     <Button
                       type="button"
@@ -869,6 +639,41 @@ export function SettingsDialog() {
                       </span>
                     </Button>
                   </div>
+                  {!azureKeyDirty && azureKeyCount > 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      {t.settings.azureKeyCount.replace("{count}", String(azureKeyCount))}
+                    </p>
+                  ) : null}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={validateAzureKeys}
+                      disabled={
+                        azureKeysValidating
+                        || (!settings.azureRegion.trim() && !settings.azureEndpoint.trim())
+                        || (!azureKeyDirty && azureKeyCount === 0)
+                        || (azureKeyDirty && !settings.azureSubscriptionKey.trim())
+                      }
+                    >
+                      <RefreshCw className={`size-4 ${azureKeysValidating ? "animate-spin" : ""}`} />
+                      {azureKeysValidating
+                        ? t.settings.azureValidatingKeys
+                        : t.settings.azureValidateKeys}
+                    </Button>
+                    <p className="text-xs text-muted-foreground">{t.settings.azureValidateKeysHelp}</p>
+                  </div>
+                  {azureKeyValidationMessage ? (
+                    <pre
+                      className={
+                        azureKeyValidationOk
+                          ? "whitespace-pre-wrap rounded-md border border-emerald-500/30 bg-emerald-950/30 px-3 py-2 text-xs text-emerald-200"
+                          : "whitespace-pre-wrap rounded-md border border-red-500/30 bg-red-950/30 px-3 py-2 text-xs text-red-200"
+                      }
+                    >
+                      {azureKeyValidationMessage}
+                    </pre>
+                  ) : null}
                 </div>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <div className="grid gap-2">

@@ -3,7 +3,7 @@
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { use, useCallback, useMemo, useState } from "react"
-import { CheckCircle2, Circle, Loader2, Play, RotateCw, Trash2, XCircle } from "lucide-react"
+import { CheckCircle2, Circle, Loader2, Pause, Play, RotateCw, Trash2, XCircle } from "lucide-react"
 
 import {
   PackageItemStatus,
@@ -13,6 +13,7 @@ import {
   deleteTaskPackage,
   getTaskPackage,
   isAbortError,
+  pauseTaskPackage,
   retryFailedTaskPackage,
 } from "@/lib/api"
 import { useI18n } from "@/lib/i18n"
@@ -41,6 +42,7 @@ export default function PackageDetailPage({ params }: { params: Promise<{ id: st
   const [error, setError] = useState("")
   const [continuing, setContinuing] = useState(false)
   const [retrying, setRetrying] = useState(false)
+  const [pausing, setPausing] = useState(false)
   const [deleting, setDeleting] = useState(false)
 
   const pollPackage = useCallback(async ({ signal, isCurrent }: SerialPollingContext) => {
@@ -56,6 +58,15 @@ export default function PackageDetailPage({ params }: { params: Promise<{ id: st
   }, [id])
 
   useSerialPolling(pollPackage)
+
+  const failedCount = useMemo(() => {
+    if (typeof pkg?.failed_count === "number") return pkg.failed_count
+    return (pkg?.items || []).filter((item) => item.status === "failed").length
+  }, [pkg?.failed_count, pkg?.items])
+
+  const canRetryFailed = failedCount > 0 && !["running", "queued"].includes(pkg?.status || "")
+  const canPause = pkg?.status === "running" || pkg?.status === "queued"
+  const pausePending = Boolean(pkg?.pause_requested)
 
   const progress = useMemo(() => {
     const items = pkg?.items || []
@@ -74,6 +85,19 @@ export default function PackageDetailPage({ params }: { params: Promise<{ id: st
       setError(err instanceof Error ? err.message : "Failed to continue package")
     } finally {
       setContinuing(false)
+    }
+  }
+
+  async function handlePause() {
+    setPausing(true)
+    setError("")
+    try {
+      const next = await pauseTaskPackage(id)
+      setPkg(next)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.task.pausePackageError)
+    } finally {
+      setPausing(false)
     }
   }
 
@@ -126,24 +150,38 @@ export default function PackageDetailPage({ params }: { params: Promise<{ id: st
                 <Progress value={progress} />
               </div>
               <div className="flex flex-wrap gap-2">
+                {canPause ? (
+                  <Button variant="outline" onClick={handlePause} disabled={pausing || pausePending}>
+                    {pausing || pausePending ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Pause className="size-4" />
+                    )}
+                    {pausing
+                      ? t.home.packagePausing
+                      : pausePending
+                        ? t.home.packagePausingRequested
+                        : t.home.packagePause}
+                  </Button>
+                ) : null}
                 {pkg.status === "paused" ? (
                   <Button onClick={handleContinue} disabled={continuing}>
                     <Play className="size-4" />
                     {continuing ? t.home.submitting : t.home.packageContinue}
                   </Button>
                 ) : null}
-                {(pkg.failed_count ?? 0) > 0 ? (
+                {canRetryFailed ? (
                   <Button variant="outline" onClick={handleRetryFailed} disabled={retrying}>
                     <RotateCw className="size-4" />
-                    {retrying ? t.home.submitting : t.home.packageRetryFailed}
+                    {retrying
+                      ? t.home.submitting
+                      : `${t.home.packageRetryFailed} (${failedCount})`}
                   </Button>
                 ) : null}
-                {!["running", "queued"].includes(pkg.status) ? (
-                  <Button variant="outline" onClick={handleDelete} disabled={deleting}>
-                    <Trash2 className="size-4" />
-                    {deleting ? t.home.batchDeleting : t.home.batchDelete}
-                  </Button>
-                ) : null}
+                <Button variant="outline" onClick={handleDelete} disabled={deleting}>
+                  <Trash2 className="size-4" />
+                  {deleting ? t.home.batchDeleting : t.home.batchDelete}
+                </Button>
               </div>
             </CardHeader>
             <CardContent className="space-y-3">

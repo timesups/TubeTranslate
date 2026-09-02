@@ -3,7 +3,7 @@
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { ChangeEvent, FormEvent, useCallback, useMemo, useRef, useState } from "react"
-import { ChevronLeft, ChevronRight, FolderMinus, Loader2, Play, RotateCw, Search, Trash2, Upload } from "lucide-react"
+import { ChevronLeft, ChevronRight, FolderMinus, Loader2, Pause, Play, RotateCw, Search, Trash2, Upload } from "lucide-react"
 
 import {
   AudioMode,
@@ -18,12 +18,20 @@ import {
   cleanupTasksBatch,
   createTasksBatch,
   createTaskPackage,
+  cleanupPackagesBatch,
+  continueTask,
+  continueTaskPackage,
+  deletePackagesBatch,
   deleteTasksBatch,
   isAbortError,
   listTaskPackages,
   listTasks,
   parseVideoUrls,
+  pauseTask,
+  pauseTaskPackage,
+  retryFailedPackagesBatch,
   resumeTasksBatch,
+  retryFailedTaskPackage,
   scanTaskPackage,
   TaskPackage,
   uploadLocalTasks,
@@ -61,6 +69,14 @@ import {
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
+import {
+  JobKindFilter,
+  filterJobEntries,
+  filterJobEntriesByStatusAndMode,
+  packageToJobEntry,
+  sortJobEntries,
+  taskToJobEntry,
+} from "@/lib/job-list"
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100]
 const TASK_SEARCH_MAX_LENGTH = 200
@@ -83,7 +99,15 @@ function isDeletable(status: string) {
 }
 
 function isFinished(status: string) {
-  return status === "succeeded" || status === "failed"
+  return status === "succeeded" || status === "failed" || status === "partial"
+}
+
+function isPackageDeletable(status: string) {
+  return status !== "running"
+}
+
+function packageHasRetryableFailures(pkg: TaskPackage) {
+  return (pkg.failed_count ?? 0) > 0 && !["running", "queued"].includes(pkg.status)
 }
 
 function selectedCountText(template: string, count: number) {
@@ -148,8 +172,8 @@ function selectedLabel<T extends string>(options: { value: T; label: string }[],
 }
 
 function pageRangeText(language: string, start: number, end: number, total: number) {
-  if (language === "zh") return `显示 ${start}-${end} / 共 ${total} 个任务`
-  return `Showing ${start}-${end} of ${total} tasks`
+  if (language === "zh") return `显示 ${start}-${end} / 共 ${total} 项`
+  return `Showing ${start}-${end} of ${total}`
 }
 
 function pageIndexText(language: string, page: number, totalPages: number) {
@@ -198,12 +222,14 @@ export default function Home() {
   const [taskQuery, setTaskQuery] = useState("")
   const [taskStatus, setTaskStatus] = useState<TaskListStatus>("all")
   const [taskExecutionMode, setTaskExecutionMode] = useState<TaskListExecutionMode>("all")
+  const [jobKindFilter, setJobKindFilter] = useState<JobKindFilter>("all")
   const [taskSort, setTaskSort] = useState<TaskListSort>("created_desc")
   const [error, setError] = useState("")
   const [message, setMessage] = useState("")
   const [taskListError, setTaskListError] = useState("")
   const [submitting, setSubmitting] = useState(false)
   const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(() => new Set())
+  const [selectedPackageIds, setSelectedPackageIds] = useState<Set<string>>(() => new Set())
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
   const [batchDeleting, setBatchDeleting] = useState(false)
   const [batchDeleteError, setBatchDeleteError] = useState("")
@@ -223,23 +249,84 @@ export default function Home() {
   const [packageMessage, setPackageMessage] = useState("")
   const [packageError, setPackageError] = useState("")
   const [packages, setPackages] = useState<TaskPackage[]>([])
+  const [packageRetryingId, setPackageRetryingId] = useState<string | null>(null)
+  const [taskPausingId, setTaskPausingId] = useState<string | null>(null)
+  const [taskContinuingId, setTaskContinuingId] = useState<string | null>(null)
+  const [packagePausingId, setPackagePausingId] = useState<string | null>(null)
+  const [packageContinuingId, setPackageContinuingId] = useState<string | null>(null)
   const parsedUrls = parseVideoUrls(urlsText)
-  const selectableTasks = useMemo(
-    () => tasks.filter((task) => isDeletable(task.status)),
-    [tasks],
+  const mergedEntries = useMemo(() => {
+    if (jobKindFilter === "task") {
+      return tasks.map(taskToJobEntry)
+    }
+    const taskEntries = jobKindFilter === "all" ? tasks.map(taskToJobEntry) : []
+    const packageEntries = packages.map(packageToJobEntry)
+    const filters = {
+      query: taskQuery,
+      status: taskStatus,
+      execution_mode: taskExecutionMode,
+    }
+    const filteredTasks = jobKindFilter === "all"
+      ? filterJobEntriesByStatusAndMode(taskEntries, filters)
+      : []
+    const filteredPackages = filterJobEntries(packageEntries, filters)
+    const filtered = [...filteredTasks, ...filteredPackages]
+    return sortJobEntries(filtered, taskSort)
+  }, [jobKindFilter, packages, taskExecutionMode, taskQuery, taskSort, taskStatus, tasks])
+  const listTotal = jobKindFilter === "task" ? taskTotal : mergedEntries.length
+  const totalPages = Math.max(1, Math.ceil(listTotal / taskPageSize))
+  const displayPage = Math.min(taskPage, totalPages)
+  const pageStart = listTotal === 0 ? 0 : (displayPage - 1) * taskPageSize + 1
+  const pageEnd = Math.min(listTotal, displayPage * taskPageSize)
+  const visibleEntries = useMemo(() => {
+    if (jobKindFilter === "task") return mergedEntries
+    const start = (displayPage - 1) * taskPageSize
+    return mergedEntries.slice(start, start + taskPageSize)
+  }, [displayPage, jobKindFilter, mergedEntries, taskPageSize])
+  const pageSelectableTasks = useMemo(
+    () =>
+      visibleEntries
+        .filter((entry) => entry.kind === "task")
+        .map((entry) => entry.task)
+        .filter((task) => isDeletable(task.status)),
+    [visibleEntries],
   )
-  const selectedFailedCount = useMemo(
-    () => tasks.filter((task) => selectedTaskIds.has(task.id) && task.status === "failed").length,
-    [tasks, selectedTaskIds],
+  const hasTaskFilters =
+    Boolean(taskQuery.trim())
+    || taskStatus !== "all"
+    || taskExecutionMode !== "all"
+    || jobKindFilter !== "all"
+  const pageSelectablePackages = useMemo(
+    () =>
+      visibleEntries
+        .filter((entry) => entry.kind === "package")
+        .map((entry) => entry.package)
+        .filter((pkg) => isPackageDeletable(pkg.status)),
+    [visibleEntries],
   )
-  const selectedCount = selectedTaskIds.size
-  const pageSelectedCount = useMemo(
-    () => selectableTasks.filter((task) => selectedTaskIds.has(task.id)).length,
-    [selectableTasks, selectedTaskIds],
-  )
+  const selectedFailedCount = useMemo(() => {
+    const failedTasks = tasks.filter(
+      (task) => selectedTaskIds.has(task.id) && task.status === "failed",
+    ).length
+    const failedPackages = packages.filter(
+      (pkg) => selectedPackageIds.has(pkg.id) && packageHasRetryableFailures(pkg),
+    ).length
+    return failedTasks + failedPackages
+  }, [packages, selectedPackageIds, selectedTaskIds, tasks])
+  const selectedCount = selectedTaskIds.size + selectedPackageIds.size
+  const pageSelectedCount = useMemo(() => {
+    const taskCount = pageSelectableTasks.filter((task) => selectedTaskIds.has(task.id)).length
+    const packageCount = pageSelectablePackages.filter((pkg) => selectedPackageIds.has(pkg.id)).length
+    return taskCount + packageCount
+  }, [pageSelectablePackages, pageSelectableTasks, selectedPackageIds, selectedTaskIds])
+  const pageSelectableCount =
+    jobKindFilter === "package"
+      ? pageSelectablePackages.length
+      : pageSelectableTasks.length + (jobKindFilter === "all" ? pageSelectablePackages.length : 0)
   const allPageSelected =
-    selectableTasks.length > 0 && pageSelectedCount === selectableTasks.length
+    pageSelectableCount > 0 && pageSelectedCount === pageSelectableCount
   const somePageSelected = pageSelectedCount > 0 && !allPageSelected
+  const showBatchActions = pageSelectableCount > 0
 
   const localDirectionOptions: { value: LocalDirection; label: string }[] = [
     { value: "en-zh", label: t.home.localEnZh },
@@ -258,7 +345,6 @@ export default function Home() {
 
   const ttsProviderOptions: { value: TtsProvider; label: string }[] = [
     { value: "voxcpm", label: t.home.ttsVoxcpm },
-    { value: "volcengine", label: t.home.ttsVolcengine },
     { value: "azure", label: t.home.ttsAzure },
   ]
 
@@ -309,6 +395,12 @@ export default function Home() {
     { value: "title_desc", label: t.home.sortTitleDesc },
   ]
 
+  const jobKindOptions: { value: JobKindFilter; label: string }[] = [
+    { value: "all", label: t.home.jobKindAll },
+    { value: "task", label: t.home.jobKindTask },
+    { value: "package", label: t.home.jobKindPackage },
+  ]
+
   const applyTaskList = useCallback((result: TaskListResponse) => {
     const lastPage = Math.max(1, Math.ceil(result.total / result.page_size))
     setTaskTotal(result.total)
@@ -329,21 +421,52 @@ export default function Home() {
     const signal = context?.signal
     const isCurrent = context?.isCurrent ?? (() => true)
     try {
-      const [result, packageResult] = await Promise.all([
-        listTasks({
+      if (jobKindFilter === "task") {
+        const result = await listTasks({
           page: taskPage,
           page_size: taskPageSize,
           q: taskQuery,
           status: taskStatus,
           execution_mode: taskExecutionMode,
           sort: taskSort,
-        }, signal),
-        listTaskPackages(10),
+        }, signal)
+        if (isCurrent()) {
+          setTaskListError("")
+          applyTaskList(result)
+          setPackages([])
+        }
+        return
+      }
+
+      const [taskResult, packageResult] = await Promise.all([
+        jobKindFilter === "all"
+          ? listTasks({
+              page: 1,
+              page_size: 100,
+              q: taskQuery,
+              status: taskStatus,
+              execution_mode: taskExecutionMode,
+              sort: "created_desc",
+            }, signal)
+          : Promise.resolve({
+              tasks: [],
+              total: 0,
+              active_count: 0,
+              page: 1,
+              page_size: 0,
+            }),
+        listTaskPackages(200, signal),
       ])
       if (isCurrent()) {
         setTaskListError("")
-        applyTaskList(result)
+        setTasks(jobKindFilter === "all" ? taskResult.tasks : [])
         setPackages(packageResult.packages)
+        setTaskTotal(0)
+        setActiveTaskCount(
+          Number.isInteger(taskResult.active_count) && taskResult.active_count >= 0
+            ? taskResult.active_count
+            : null,
+        )
       }
     } catch (err) {
       if (isCurrent() && !isAbortError(err)) {
@@ -352,6 +475,7 @@ export default function Home() {
     }
   }, [
     applyTaskList,
+    jobKindFilter,
     taskExecutionMode,
     taskPage,
     taskPageSize,
@@ -376,12 +500,29 @@ export default function Home() {
     })
   }
 
+  function togglePackageSelected(packageId: string, checked: boolean) {
+    setSelectedPackageIds((current) => {
+      const next = new Set(current)
+      if (checked) next.add(packageId)
+      else next.delete(packageId)
+      return next
+    })
+  }
+
   function toggleSelectAllPage(checked: boolean) {
     setSelectedTaskIds((current) => {
       const next = new Set(current)
-      for (const task of selectableTasks) {
+      for (const task of pageSelectableTasks) {
         if (checked) next.add(task.id)
         else next.delete(task.id)
+      }
+      return next
+    })
+    setSelectedPackageIds((current) => {
+      const next = new Set(current)
+      for (const pkg of pageSelectablePackages) {
+        if (checked) next.add(pkg.id)
+        else next.delete(pkg.id)
       }
       return next
     })
@@ -390,8 +531,15 @@ export default function Home() {
   function selectFinishedOnPage() {
     setSelectedTaskIds((current) => {
       const next = new Set(current)
-      for (const task of tasks) {
+      for (const task of pageSelectableTasks) {
         if (isFinished(task.status)) next.add(task.id)
+      }
+      return next
+    })
+    setSelectedPackageIds((current) => {
+      const next = new Set(current)
+      for (const pkg of pageSelectablePackages) {
+        if (isFinished(pkg.status)) next.add(pkg.id)
       }
       return next
     })
@@ -399,33 +547,54 @@ export default function Home() {
 
   function clearTaskSelection() {
     setSelectedTaskIds(new Set())
+    setSelectedPackageIds(new Set())
   }
 
   async function handleBatchDelete() {
     const taskIds = Array.from(selectedTaskIds)
-    if (!taskIds.length) {
+    const packageIds = Array.from(selectedPackageIds)
+    if (!taskIds.length && !packageIds.length) {
       setBatchDeleteError(t.home.batchDeleteNone)
       return
     }
     setBatchDeleting(true)
     setBatchDeleteError("")
     try {
-      const result = await deleteTasksBatch(taskIds)
-      const deletedSet = new Set(result.deleted)
+      const [taskResult, packageResult] = await Promise.all([
+        taskIds.length ? deleteTasksBatch(taskIds) : Promise.resolve({
+          deleted: [],
+          skipped: [],
+          missing: [],
+          failed: [],
+        }),
+        packageIds.length ? deletePackagesBatch(packageIds) : Promise.resolve({
+          deleted: [],
+          skipped: [],
+          missing: [],
+          failed: [],
+        }),
+      ])
+      const deletedSet = new Set([...taskResult.deleted, ...packageResult.deleted])
       setSelectedTaskIds((current) => {
         const next = new Set(current)
         for (const id of deletedSet) next.delete(id)
-        for (const id of result.missing) next.delete(id)
+        for (const id of [...taskResult.missing, ...packageResult.missing]) next.delete(id)
+        return next
+      })
+      setSelectedPackageIds((current) => {
+        const next = new Set(current)
+        for (const id of deletedSet) next.delete(id)
+        for (const id of [...taskResult.missing, ...packageResult.missing]) next.delete(id)
         return next
       })
       setBatchDeleteOpen(false)
       setMessage(
         batchDeleteSummaryText(
           t.home.batchDeleteSummary,
-          result.deleted.length,
-          result.skipped.length,
-          result.missing.length,
-          result.failed.length,
+          taskResult.deleted.length + packageResult.deleted.length,
+          taskResult.skipped.length + packageResult.skipped.length,
+          taskResult.missing.length + packageResult.missing.length,
+          taskResult.failed.length + packageResult.failed.length,
         ),
       )
       await pollTasks()
@@ -438,22 +607,36 @@ export default function Home() {
 
   async function handleBatchCleanup() {
     const taskIds = Array.from(selectedTaskIds)
-    if (!taskIds.length) {
+    const packageIds = Array.from(selectedPackageIds)
+    if (!taskIds.length && !packageIds.length) {
       setBatchCleanupError(t.home.batchCleanupNone)
       return
     }
     setBatchCleaning(true)
     setBatchCleanupError("")
     try {
-      const result = await cleanupTasksBatch(taskIds)
+      const [taskResult, packageResult] = await Promise.all([
+        taskIds.length ? cleanupTasksBatch(taskIds) : Promise.resolve({
+          cleaned: [],
+          skipped: [],
+          missing: [],
+          failed: [],
+        }),
+        packageIds.length ? cleanupPackagesBatch(packageIds) : Promise.resolve({
+          cleaned: [],
+          skipped: [],
+          missing: [],
+          failed: [],
+        }),
+      ])
       setBatchCleanupOpen(false)
       setMessage(
         batchCleanupSummaryText(
           t.home.batchCleanupSummary,
-          result.cleaned.length,
-          result.skipped.length,
-          result.missing.length,
-          result.failed.length,
+          taskResult.cleaned.length + packageResult.cleaned.length,
+          taskResult.skipped.length + packageResult.skipped.length,
+          taskResult.missing.length + packageResult.missing.length,
+          taskResult.failed.length + packageResult.failed.length,
         ),
       )
       await pollTasks()
@@ -466,29 +649,49 @@ export default function Home() {
 
   async function handleBatchRetry() {
     const taskIds = Array.from(selectedTaskIds)
-    if (!taskIds.length) {
+    const packageIds = Array.from(selectedPackageIds)
+    if (!taskIds.length && !packageIds.length) {
       setBatchRetryError(t.home.batchRetryNone)
       return
     }
     setBatchRetrying(true)
     setBatchRetryError("")
     try {
-      const result = await resumeTasksBatch(taskIds)
-      const resumedSet = new Set(result.resumed)
+      const [taskResult, packageResult] = await Promise.all([
+        taskIds.length ? resumeTasksBatch(taskIds) : Promise.resolve({
+          resumed: [],
+          skipped: [],
+          missing: [],
+          failed: [],
+        }),
+        packageIds.length ? retryFailedPackagesBatch(packageIds) : Promise.resolve({
+          retried: [],
+          skipped: [],
+          missing: [],
+          failed: [],
+        }),
+      ])
+      const resumedSet = new Set([...taskResult.resumed, ...packageResult.retried])
       setSelectedTaskIds((current) => {
         const next = new Set(current)
         for (const id of resumedSet) next.delete(id)
-        for (const id of result.missing) next.delete(id)
+        for (const id of [...taskResult.missing, ...packageResult.missing]) next.delete(id)
+        return next
+      })
+      setSelectedPackageIds((current) => {
+        const next = new Set(current)
+        for (const id of resumedSet) next.delete(id)
+        for (const id of [...taskResult.missing, ...packageResult.missing]) next.delete(id)
         return next
       })
       setBatchRetryOpen(false)
       setMessage(
         batchRetrySummaryText(
           t.home.batchRetrySummary,
-          result.resumed.length,
-          result.skipped.length,
-          result.missing.length,
-          result.failed.length,
+          taskResult.resumed.length + packageResult.retried.length,
+          taskResult.skipped.length + packageResult.skipped.length,
+          taskResult.missing.length + packageResult.missing.length,
+          taskResult.failed.length + packageResult.failed.length,
         ),
       )
       await pollTasks()
@@ -569,7 +772,6 @@ export default function Home() {
         execution_mode: executionMode,
         audio_mode: audioMode,
         tts_provider: ttsProvider,
-        export_subtitle: true,
         continue_on_error: true,
         skip_if_export_exists: true,
       })
@@ -585,6 +787,95 @@ export default function Home() {
       setPackageError(err instanceof Error ? err.message : t.home.createError)
     } finally {
       setPackageSubmitting(false)
+    }
+  }
+
+  async function handlePauseTask(taskId: string) {
+    setTaskListError("")
+    setTaskPausingId(taskId)
+    try {
+      const updated = await pauseTask(taskId)
+      setTasks((current) =>
+        current.map((entry) => (entry.id === taskId ? { ...entry, ...updated } : entry)),
+      )
+      await pollTasks()
+    } catch (err) {
+      setTaskListError(err instanceof Error ? err.message : t.task.pauseError)
+    } finally {
+      setTaskPausingId(null)
+    }
+  }
+
+  async function handleContinueTask(taskId: string) {
+    setTaskListError("")
+    setTaskContinuingId(taskId)
+    try {
+      const updated = await continueTask(taskId)
+      setTasks((current) =>
+        current.map((entry) => (entry.id === taskId ? { ...entry, ...updated } : entry)),
+      )
+      await pollTasks()
+    } catch (err) {
+      setTaskListError(err instanceof Error ? err.message : t.task.continueError)
+    } finally {
+      setTaskContinuingId(null)
+    }
+  }
+
+  async function handlePausePackage(packageId: string) {
+    setPackageError("")
+    setPackageMessage("")
+    setPackagePausingId(packageId)
+    try {
+      const updated = await pauseTaskPackage(packageId)
+      setPackages((current) =>
+        current.map((entry) => (entry.id === packageId ? { ...entry, ...updated } : entry)),
+      )
+      await pollTasks()
+    } catch (err) {
+      setPackageError(err instanceof Error ? err.message : t.task.pausePackageError)
+    } finally {
+      setPackagePausingId(null)
+    }
+  }
+
+  async function handleContinuePackage(packageId: string) {
+    setPackageError("")
+    setPackageMessage("")
+    setPackageContinuingId(packageId)
+    try {
+      const updated = await continueTaskPackage(packageId)
+      setPackages((current) =>
+        current.map((entry) => (entry.id === packageId ? { ...entry, ...updated } : entry)),
+      )
+      await pollTasks()
+    } catch (err) {
+      setPackageError(err instanceof Error ? err.message : t.task.continueError)
+    } finally {
+      setPackageContinuingId(null)
+    }
+  }
+
+  async function handleRetryPackageFailed(packageId: string) {
+    setPackageError("")
+    setPackageMessage("")
+    setPackageRetryingId(packageId)
+    try {
+      const updated = await retryFailedTaskPackage(packageId)
+      setPackages((current) =>
+        current.map((entry) => (entry.id === packageId ? { ...entry, ...updated } : entry)),
+      )
+      setPackageMessage(
+        t.home.packageRetryQueued.replace(
+          "{count}",
+          String(updated.retried_count ?? 0),
+        ),
+      )
+      await pollTasks()
+    } catch (err) {
+      setPackageError(err instanceof Error ? err.message : t.home.packageRetryError)
+    } finally {
+      setPackageRetryingId(null)
     }
   }
 
@@ -694,11 +985,6 @@ export default function Home() {
   const hasLocalFile = localFiles.length > 0
   const isSingleLocalFile = localFiles.length === 1
   const canSubmit = Boolean((hasUrl || hasLocalFile) && !submitting)
-  const totalPages = Math.max(1, Math.ceil(taskTotal / taskPageSize))
-  const displayPage = Math.min(taskPage, totalPages)
-  const pageStart = taskTotal === 0 ? 0 : (displayPage - 1) * taskPageSize + 1
-  const pageEnd = Math.min(taskTotal, displayPage * taskPageSize)
-  const hasTaskFilters = Boolean(taskQuery.trim()) || taskStatus !== "all" || taskExecutionMode !== "all"
 
   return (
     <AppShell>
@@ -1089,40 +1375,16 @@ export default function Home() {
                 {packageError}
               </div>
             ) : null}
-            {packages.length ? (
-              <div className="mt-6 space-y-2">
-                <p className="text-sm font-medium">{t.home.packageListTitle}</p>
-                {packages.map((entry) => (
-                  <div
-                    key={entry.id}
-                    className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/60 px-3 py-2"
-                  >
-                    <div className="min-w-0">
-                      <p className="truncate font-medium">{entry.name || entry.source_root}</p>
-                      <p className="truncate text-xs text-muted-foreground">
-                        {(entry.succeeded_count ?? 0)}/{entry.item_count ?? 0} · {entry.source_root}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Badge className={statusBadgeClass(entry.status)}>{statusLabel(entry.status)}</Badge>
-                      <Button nativeButton={false} size="sm" variant="outline" render={<Link href={`/packages/${entry.id}`} />}>
-                        {t.home.packageView}
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : null}
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
-            <CardTitle>{t.home.taskHistory} ({taskTotal})</CardTitle>
+            <CardTitle>{t.home.jobHistory} ({listTotal})</CardTitle>
           </CardHeader>
           <CardContent className="px-0">
             <div className="border-b border-border/60 px-4 pb-4">
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_140px_140px_180px_120px]">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_120px_140px_140px_180px_120px]">
                 <div className="relative sm:col-span-2 lg:col-span-1">
                   <Label htmlFor="task-search" className="sr-only">
                     {t.home.taskSearchPlaceholder}
@@ -1138,6 +1400,32 @@ export default function Home() {
                     }}
                     placeholder={t.home.taskSearchPlaceholder}
                   />
+                </div>
+
+                <div>
+                  <Label htmlFor="job-kind-filter" className="sr-only">
+                    {t.home.jobKindFilter}
+                  </Label>
+                  <Select
+                    value={jobKindFilter}
+                    onValueChange={(value) => {
+                      setJobKindFilter(value as JobKindFilter)
+                      resetTaskPage()
+                    }}
+                  >
+                    <SelectTrigger id="job-kind-filter" className="h-9">
+                      <span className="min-w-0 truncate text-left">
+                        {selectedLabel(jobKindOptions, jobKindFilter)}
+                      </span>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {jobKindOptions.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 <div>
@@ -1252,7 +1540,7 @@ export default function Home() {
               </div>
             ) : null}
 
-            {tasks.length > 0 ? (
+            {showBatchActions ? (
               <div className="flex flex-col gap-2 border-b border-border/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex items-center gap-3">
                   <label className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1264,7 +1552,7 @@ export default function Home() {
                         if (element) element.indeterminate = somePageSelected
                       }}
                       onChange={(event) => toggleSelectAllPage(event.target.checked)}
-                      disabled={selectableTasks.length === 0}
+                      disabled={pageSelectableCount === 0}
                       aria-label={t.home.selectAllPage}
                     />
                     <span>
@@ -1280,7 +1568,10 @@ export default function Home() {
                     variant="outline"
                     size="sm"
                     onClick={selectFinishedOnPage}
-                    disabled={!tasks.some((task) => isFinished(task.status))}
+                    disabled={
+                      !pageSelectableTasks.some((task) => isFinished(task.status))
+                      && !pageSelectablePackages.some((pkg) => isFinished(pkg.status))
+                    }
                   >
                     {t.home.selectFinishedPage}
                   </Button>
@@ -1339,56 +1630,197 @@ export default function Home() {
               </div>
             ) : null}
 
-            {tasks.length === 0 ? (
+            {visibleEntries.length === 0 ? (
               <div className="px-6 py-12 text-center text-sm text-muted-foreground">
                 {hasTaskFilters ? t.home.noMatchingTasks : t.home.empty}
               </div>
             ) : (
               <div className="max-h-[min(56dvh,calc(100dvh-18rem))] overflow-y-auto overscroll-contain">
                 <ul className="flex flex-col">
-                  {tasks.map((item) => {
-                    const deletable = isDeletable(item.status)
-                    const checked = selectedTaskIds.has(item.id)
+                  {visibleEntries.map((entry) => {
+                    if (entry.kind === "task") {
+                      const item = entry.task
+                      const deletable = isDeletable(item.status)
+                      const checked = selectedTaskIds.has(item.id)
+                      const canPauseTask = item.status === "queued"
+                      const canContinueTask = item.status === "paused"
+                      return (
+                        <li key={`task-${item.id}`} className="border-b border-border/60 last:border-b-0">
+                          <div
+                            className={cn(
+                              "flex w-full items-center gap-3 px-4 py-3 text-sm transition-colors hover:bg-muted/60 sm:px-6",
+                              checked ? "bg-muted/40" : "",
+                            )}
+                          >
+                            {jobKindFilter !== "package" ? (
+                              <input
+                                type="checkbox"
+                                className="size-4 shrink-0 accent-zinc-900"
+                                checked={checked}
+                                disabled={!deletable}
+                                onChange={(event) => toggleTaskSelected(item.id, event.target.checked)}
+                                aria-label={`${t.home.selectTask}: ${item.title || shortUrl(item.url)}`}
+                                onClick={(event) => event.stopPropagation()}
+                              />
+                            ) : (
+                              <span className="size-4 shrink-0" aria-hidden="true" />
+                            )}
+                            <Link href={entry.href} className="flex min-w-0 flex-1 items-center gap-3">
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <p className="truncate text-left font-medium text-foreground">
+                                    {entry.title}
+                                  </p>
+                                  {jobKindFilter === "all" ? (
+                                    <Badge variant="outline" className="text-[10px]">
+                                      {t.home.jobKindBadgeTask}
+                                    </Badge>
+                                  ) : null}
+                                </div>
+                                <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                                  <Badge className={statusBadgeClass(item.status)}>
+                                    {statusLabel(item.status)}
+                                  </Badge>
+                                  <span>{formatTime(item.created_at)}</span>
+                                  {isActive(item.status) && item.current_stage ? (
+                                    <span>· {stageLabel(item.current_stage)}</span>
+                                  ) : null}
+                                  {isAwaitingAction(item.status) ? (
+                                    <span>· {t.status.paused}</span>
+                                  ) : null}
+                                </div>
+                              </div>
+                              <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+                            </Link>
+                            {canPauseTask ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={taskPausingId === item.id}
+                                onClick={() => handlePauseTask(item.id)}
+                              >
+                                {taskPausingId === item.id ? (
+                                  <Loader2 className="size-3.5 animate-spin" />
+                                ) : (
+                                  <Pause className="size-3.5" />
+                                )}
+                                {taskPausingId === item.id ? t.task.pausing : t.task.pauseTask}
+                              </Button>
+                            ) : null}
+                            {canContinueTask ? (
+                              <Button
+                                size="sm"
+                                disabled={taskContinuingId === item.id}
+                                onClick={() => handleContinueTask(item.id)}
+                              >
+                                {taskContinuingId === item.id ? (
+                                  <Loader2 className="size-3.5 animate-spin" />
+                                ) : (
+                                  <Play className="size-3.5" />
+                                )}
+                                {taskContinuingId === item.id ? t.task.continuing : t.task.resumePausedTask}
+                              </Button>
+                            ) : null}
+                          </div>
+                        </li>
+                      )
+                    }
+
+                    const pkg = entry.package
+                    const deletable = isPackageDeletable(pkg.status)
+                    const checked = selectedPackageIds.has(pkg.id)
+                    const canRetryPackage = packageHasRetryableFailures(pkg)
+                    const canPausePackage = pkg.status === "queued"
+                    const canContinuePackage = pkg.status === "paused"
                     return (
-                      <li key={item.id} className="border-b border-border/60 last:border-b-0">
+                      <li key={`package-${pkg.id}`} className="border-b border-border/60 last:border-b-0">
                         <div
                           className={cn(
                             "flex w-full items-center gap-3 px-4 py-3 text-sm transition-colors hover:bg-muted/60 sm:px-6",
                             checked ? "bg-muted/40" : "",
                           )}
                         >
-                          <input
-                            type="checkbox"
-                            className="size-4 shrink-0 accent-zinc-900"
-                            checked={checked}
-                            disabled={!deletable}
-                            onChange={(event) => toggleTaskSelected(item.id, event.target.checked)}
-                            aria-label={`${t.home.selectTask}: ${item.title || shortUrl(item.url)}`}
-                            onClick={(event) => event.stopPropagation()}
-                          />
-                          <Link
-                            href={`/tasks/${item.id}`}
-                            className="flex min-w-0 flex-1 items-center gap-3"
-                          >
+                          {jobKindFilter !== "task" ? (
+                            <input
+                              type="checkbox"
+                              className="size-4 shrink-0 accent-zinc-900"
+                              checked={checked}
+                              disabled={!deletable}
+                              onChange={(event) => togglePackageSelected(pkg.id, event.target.checked)}
+                              aria-label={`${t.home.selectPackage}: ${entry.title}`}
+                              onClick={(event) => event.stopPropagation()}
+                            />
+                          ) : (
+                            <span className="size-4 shrink-0" aria-hidden="true" />
+                          )}
+                          <Link href={entry.href} className="flex min-w-0 flex-1 items-center gap-3">
                             <div className="min-w-0 flex-1">
-                              <p className="truncate text-left font-medium text-foreground">
-                                {item.title || shortUrl(item.url)}
-                              </p>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <p className="truncate text-left font-medium text-foreground">
+                                  {entry.title}
+                                </p>
+                                {jobKindFilter === "all" ? (
+                                  <Badge variant="outline" className="text-[10px]">
+                                    {t.home.jobKindBadgePackage}
+                                  </Badge>
+                                ) : null}
+                              </div>
                               <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                                <Badge className={statusBadgeClass(item.status)}>
-                                  {statusLabel(item.status)}
+                                <Badge className={statusBadgeClass(pkg.status)}>
+                                  {statusLabel(pkg.status)}
                                 </Badge>
-                                <span>{formatTime(item.created_at)}</span>
-                                {isActive(item.status) && item.current_stage ? (
-                                  <span>· {stageLabel(item.current_stage)}</span>
-                                ) : null}
-                                {isAwaitingAction(item.status) ? (
-                                  <span>· {t.status.paused}</span>
-                                ) : null}
+                                <span>{formatTime(pkg.created_at)}</span>
+                                <span className="truncate">· {entry.subtitle}</span>
                               </div>
                             </div>
                             <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
                           </Link>
+                          {canPausePackage ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={packagePausingId === pkg.id}
+                              onClick={() => handlePausePackage(pkg.id)}
+                            >
+                              {packagePausingId === pkg.id ? (
+                                <Loader2 className="size-3.5 animate-spin" />
+                              ) : (
+                                <Pause className="size-3.5" />
+                              )}
+                              {packagePausingId === pkg.id
+                                ? t.home.submitting
+                                : t.home.packagePause}
+                            </Button>
+                          ) : null}
+                          {canContinuePackage ? (
+                            <Button
+                              size="sm"
+                              disabled={packageContinuingId === pkg.id}
+                              onClick={() => handleContinuePackage(pkg.id)}
+                            >
+                              {packageContinuingId === pkg.id ? (
+                                <Loader2 className="size-3.5 animate-spin" />
+                              ) : (
+                                <Play className="size-3.5" />
+                              )}
+                              {packageContinuingId === pkg.id
+                                ? t.home.submitting
+                                : t.home.packageContinue}
+                            </Button>
+                          ) : null}
+                          {canRetryPackage ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={packageRetryingId === pkg.id}
+                              onClick={() => handleRetryPackageFailed(pkg.id)}
+                            >
+                              <RotateCw className="size-3.5" />
+                              {packageRetryingId === pkg.id
+                                ? t.home.submitting
+                                : t.home.packageRetryFailed}
+                            </Button>
+                          ) : null}
                         </div>
                       </li>
                     )
@@ -1500,9 +1932,9 @@ export default function Home() {
               </DialogContent>
             </Dialog>
 
-            {taskTotal > 0 ? (
+            {listTotal > 0 ? (
               <div className="flex flex-col gap-3 border-t border-border/60 px-4 py-3 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-                <span>{pageRangeText(language, pageStart, pageEnd, taskTotal)}</span>
+                <span>{pageRangeText(language, pageStart, pageEnd, listTotal)}</span>
                 <div className="flex items-center justify-between gap-3 sm:justify-end">
                   <span>{pageIndexText(language, displayPage, totalPages)}</span>
                   <div className="flex items-center gap-2">

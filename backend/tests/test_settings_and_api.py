@@ -1283,15 +1283,47 @@ def test_continue_task_can_switch_to_auto(monkeypatch, tmp_path):
     assert enqueued == [task_id]
 
 
-def test_continue_task_rejects_auto_task(monkeypatch, tmp_path):
+def test_continue_task_accepts_auto_paused_task(monkeypatch, tmp_path):
     configure_tmp_runtime(monkeypatch, tmp_path)
     task_id = database.create_task("https://www.youtube.com/watch?v=autocontinue", task_id="autocontinue")
     database.update_task(task_id, status="paused")
+    enqueued: list[str] = []
+    monkeypatch.setattr(main.worker, "enqueue", lambda tid: enqueued.append(tid))
 
     client = authenticated_client()
     response = client.post(f"/api/tasks/{task_id}/continue")
 
-    assert response.status_code == 409
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "queued"
+    assert enqueued == [task_id]
+
+
+def test_pause_task_immediately_when_queued(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    task_id = database.create_task("https://www.youtube.com/watch?v=pausequeued", task_id="pausequeued")
+
+    client = authenticated_client()
+    response = client.post(f"/api/tasks/{task_id}/pause")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "paused"
+    assert body["pause_requested"] is False
+
+
+def test_pause_task_marks_running_task_for_pause(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    task_id = database.create_task("https://www.youtube.com/watch?v=pauserun", task_id="pauserun")
+    database.update_task(task_id, status="running")
+
+    client = authenticated_client()
+    response = client.post(f"/api/tasks/{task_id}/pause")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "running"
+    assert body["pause_requested"] is True
 
 
 def test_redo_stage_requeues_manual_task(monkeypatch, tmp_path):

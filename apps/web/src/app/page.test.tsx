@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
@@ -10,6 +10,20 @@ const mocks = vi.hoisted(() => ({
   fetch: vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(),
   push: vi.fn(),
 }))
+
+function emptyPackagesResponse() {
+  return new Response(JSON.stringify({ packages: [] }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  })
+}
+
+function respondTaskPackagesGet(path: string, method: string) {
+  if (path.startsWith("/api/task-packages") && method === "GET") {
+    return emptyPackagesResponse()
+  }
+  return null
+}
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mocks.push }),
@@ -35,6 +49,9 @@ describe("本地视频字幕选择", () => {
           status: 200,
           headers: { "Content-Type": "application/json" },
         })
+      }
+      if (path.startsWith("/api/task-packages")) {
+        return emptyPackagesResponse()
       }
       if (path.startsWith("/api/tasks")) {
         return new Response(JSON.stringify({
@@ -107,6 +124,9 @@ describe("本地视频字幕选择", () => {
           headers: { "Content-Type": "application/json" },
         })
       }
+      if (path.startsWith("/api/task-packages")) {
+        return emptyPackagesResponse()
+      }
       if (path.startsWith("/api/tasks")) {
         return new Response(JSON.stringify({
           tasks: [],
@@ -166,6 +186,9 @@ describe("任务列表轮询", () => {
 
     mocks.fetch.mockImplementation(async (input: RequestInfo | URL) => {
       const path = String(input)
+      if (path.startsWith("/api/task-packages")) {
+        return emptyPackagesResponse()
+      }
       if (!path.startsWith("/api/tasks")) throw new Error(`未预期的请求: ${path}`)
       listRequestCount += 1
       if (listRequestCount === 1) return oldRequest
@@ -200,13 +223,14 @@ describe("任务列表轮询", () => {
       </LanguageProvider>,
     )
 
-    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(2))
     fireEvent.change(screen.getByPlaceholderText("搜索标题、链接或任务 ID"), {
       target: { value: "new" },
     })
 
     expect(await screen.findByText("新列表任务")).toBeInTheDocument()
-    const oldSignal = mocks.fetch.mock.calls[0][1]?.signal
+    const tasksCall = mocks.fetch.mock.calls.find(([input]) => String(input).startsWith("/api/tasks"))
+    const oldSignal = tasksCall?.[1]?.signal
     expect(oldSignal?.aborted).toBe(true)
 
     await act(async () => {
@@ -245,6 +269,9 @@ describe("全局活跃任务数", () => {
   it("切换到已完成筛选后仍显示超过单页容量的全局活跃数", async () => {
     mocks.fetch.mockImplementation(async (input: RequestInfo | URL) => {
       const url = new URL(String(input), "http://localhost")
+      if (url.pathname.startsWith("/api/task-packages")) {
+        return emptyPackagesResponse()
+      }
       if (url.pathname !== "/api/tasks") throw new Error(`未预期的请求: ${url.pathname}`)
       const succeededOnly = url.searchParams.get("status") === "succeeded"
       return new Response(JSON.stringify({
@@ -279,7 +306,7 @@ describe("全局活跃任务数", () => {
       </LanguageProvider>,
     )
 
-    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(2))
     await user.click(screen.getByLabelText("状态"))
     await user.click(await screen.findByRole("option", { name: "已完成" }))
 
@@ -295,6 +322,9 @@ describe("任务搜索校验错误", () => {
   it("限制搜索长度，将错误数组显示为可读文本，并在恢复成功后清除错误", async () => {
     mocks.fetch.mockImplementation(async (input: RequestInfo | URL) => {
       const url = new URL(String(input), "http://localhost")
+      if (url.pathname.startsWith("/api/task-packages")) {
+        return emptyPackagesResponse()
+      }
       if (url.pathname !== "/api/tasks") throw new Error(`未预期的请求: ${url.pathname}`)
       const query = url.searchParams.get("q") || ""
       if (query === "broken") {
@@ -350,7 +380,7 @@ describe("任务搜索校验错误", () => {
     )
 
     const search = screen.getByPlaceholderText("搜索标题、链接或任务 ID")
-    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(2))
 
     const oversizedQuery = "😀".repeat(201)
     fireEvent.change(search, { target: { value: oversizedQuery } })
@@ -388,6 +418,9 @@ describe("任务搜索校验错误", () => {
     let requestCount = 0
     mocks.fetch.mockImplementation(async (input: RequestInfo | URL) => {
       const url = new URL(String(input), "http://localhost")
+      if (url.pathname.startsWith("/api/task-packages")) {
+        return emptyPackagesResponse()
+      }
       if (url.pathname !== "/api/tasks") throw new Error(`未预期的请求: ${url.pathname}`)
       requestCount += 1
       if (requestCount === 1) return oldRequest
@@ -405,7 +438,7 @@ describe("任务搜索校验错误", () => {
         <Home />
       </LanguageProvider>,
     )
-    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(2))
     fireEvent.change(screen.getByPlaceholderText("搜索标题、链接或任务 ID"), {
       target: { value: "new-query" },
     })
@@ -432,6 +465,9 @@ describe("任务搜索校验错误", () => {
     mocks.fetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), "http://localhost")
       const method = init?.method || "GET"
+      if (url.pathname.startsWith("/api/task-packages") && method === "GET") {
+        return emptyPackagesResponse()
+      }
       if (url.pathname === "/api/tasks/batch" && method === "POST") {
         return new Response(JSON.stringify({ detail: "创建任务失败" }), {
           status: 500,
@@ -460,7 +496,7 @@ describe("任务搜索校验错误", () => {
         <Home />
       </LanguageProvider>,
     )
-    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(2))
     await user.type(screen.getByLabelText("视频链接"), "https://www.youtube.com/watch?v=testvideo01")
     await user.click(screen.getByRole("button", { name: "创建任务" }))
     expect(await screen.findByText("创建任务失败")).toBeInTheDocument()
@@ -468,7 +504,7 @@ describe("任务搜索校验错误", () => {
     fireEvent.change(screen.getByPlaceholderText("搜索标题、链接或任务 ID"), {
       target: { value: "refresh" },
     })
-    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(3))
+    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(5))
 
     expect(screen.getByText("创建任务失败")).toBeInTheDocument()
   })
@@ -477,6 +513,9 @@ describe("任务搜索校验错误", () => {
     mocks.fetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), "http://localhost")
       const method = init?.method || "GET"
+      if (url.pathname.startsWith("/api/task-packages") && method === "GET") {
+        return emptyPackagesResponse()
+      }
       if (url.pathname === "/api/tasks/batch" && method === "POST") {
         return new Response(JSON.stringify({
           created: [
@@ -512,7 +551,7 @@ describe("任务搜索校验错误", () => {
         <Home />
       </LanguageProvider>,
     )
-    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(2))
     await user.type(
       screen.getByLabelText("视频链接"),
       "https://www.youtube.com/watch?v=batchaaa001\nhttps://www.youtube.com/watch?v=batchbbb002",
@@ -534,6 +573,8 @@ describe("任务搜索校验错误", () => {
       audio_mode: "replace",
       tts_provider: "azure",
       bilibili_tid: 229,
+      bilibili_auto_publish: true,
+      bilibili_generate_meta: true,
     })
   })
 })
@@ -585,6 +626,12 @@ describe("任务批量删除", () => {
     mocks.fetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       const method = init?.method || "GET"
+      if (path.startsWith("/api/task-packages") && method === "GET") {
+        return new Response(JSON.stringify({ packages: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
       if (path.startsWith("/api/tasks") && method === "GET" && !path.includes("batch-delete")) {
         return new Response(JSON.stringify({
           tasks,
@@ -695,6 +742,8 @@ describe("任务批量重试", () => {
     mocks.fetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       const method = init?.method || "GET"
+      const packagesResponse = respondTaskPackagesGet(path, method)
+      if (packagesResponse) return packagesResponse
       if (path.startsWith("/api/tasks") && method === "GET" && !path.includes("batch-")) {
         return new Response(JSON.stringify({
           tasks,
@@ -752,6 +801,128 @@ describe("任务批量重试", () => {
     )
     expect(JSON.parse(String(resumeCall?.[1]?.body))).toEqual({
       task_ids: ["done-1", "fail-1", "fail-2"],
+    })
+  })
+})
+
+describe("任务列表暂停与继续", () => {
+  it("排队任务可暂停，已暂停任务可继续", async () => {
+    let tasks = [
+      {
+        id: "queued-1",
+        url: "https://example.com/queued-1",
+        title: "排队任务",
+        status: "queued",
+        current_stage: null,
+        final_video_path: null,
+        error_message: null,
+        created_at: "2026-07-14T00:00:00Z",
+        started_at: null,
+        completed_at: null,
+        execution_mode: "auto",
+      },
+      {
+        id: "paused-1",
+        url: "https://example.com/paused-1",
+        title: "已暂停任务",
+        status: "paused",
+        current_stage: "asr",
+        final_video_path: null,
+        error_message: null,
+        created_at: "2026-07-14T00:00:00Z",
+        started_at: "2026-07-14T00:10:00Z",
+        completed_at: null,
+        execution_mode: "auto",
+      },
+      {
+        id: "running-1",
+        url: "https://example.com/running-1",
+        title: "运行中任务",
+        status: "running",
+        current_stage: "download",
+        final_video_path: null,
+        error_message: null,
+        created_at: "2026-07-14T00:00:00Z",
+        started_at: "2026-07-14T00:05:00Z",
+        completed_at: null,
+        execution_mode: "auto",
+      },
+    ]
+
+    mocks.fetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      const method = init?.method || "GET"
+      const packagesResponse = respondTaskPackagesGet(path, method)
+      if (packagesResponse) return packagesResponse
+      if (path.startsWith("/api/tasks") && method === "GET") {
+        return new Response(JSON.stringify({
+          tasks,
+          total: tasks.length,
+          active_count: tasks.filter((task) => task.status === "running" || task.status === "queued").length,
+          page: 1,
+          page_size: 100,
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      if (path === "/api/tasks/queued-1/pause" && method === "POST") {
+        tasks = tasks.map((task) => (
+          task.id === "queued-1"
+            ? { ...task, status: "paused", current_stage: "download" }
+            : task
+        ))
+        return new Response(JSON.stringify(tasks.find((task) => task.id === "queued-1")), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      if (path === "/api/tasks/paused-1/continue" && method === "POST") {
+        tasks = tasks.map((task) => (
+          task.id === "paused-1"
+            ? { ...task, status: "queued", error_message: null }
+            : task
+        ))
+        return new Response(JSON.stringify(tasks.find((task) => task.id === "paused-1")), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      if (path === "/api/tasks/queued-1/continue" && method === "POST") {
+        return new Response(JSON.stringify({ detail: "unexpected" }), { status: 409 })
+      }
+      throw new Error(`未预期的请求: ${method} ${path}`)
+    })
+    vi.stubGlobal("fetch", mocks.fetch)
+
+    const user = userEvent.setup()
+    render(
+      <LanguageProvider>
+        <Home />
+      </LanguageProvider>,
+    )
+
+    expect(await screen.findByText("排队任务")).toBeInTheDocument()
+    expect(screen.getAllByRole("button", { name: "暂停任务" })).toHaveLength(1)
+    expect(screen.getAllByRole("button", { name: "继续任务" })).toHaveLength(1)
+
+    await user.click(screen.getByRole("button", { name: "暂停任务" }))
+    await waitFor(() => {
+      expect(mocks.fetch.mock.calls.some(
+        ([input, init]) => String(input) === "/api/tasks/queued-1/pause" && init?.method === "POST",
+      )).toBe(true)
+    })
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: "继续任务" })).toHaveLength(2)
+    })
+    const pausedRow = screen.getByText("已暂停任务").closest("li")
+    expect(pausedRow).toBeTruthy()
+    await user.click(within(pausedRow as HTMLElement).getByRole("button", { name: "继续任务" }))
+    await waitFor(() => {
+      expect(mocks.fetch.mock.calls.some(
+        ([input, init]) => String(input) === "/api/tasks/paused-1/continue" && init?.method === "POST",
+      )).toBe(true)
     })
   })
 })

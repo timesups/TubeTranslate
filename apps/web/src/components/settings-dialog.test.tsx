@@ -16,21 +16,6 @@ function jsonResponse(body: unknown, status = 200) {
   })
 }
 
-const defaultVolcengine = {
-  app_id: "app-1",
-  access_key: "********",
-  has_access_key: true,
-  api_key: "********",
-  has_api_key: true,
-  resource_id: "seed-tts-2.0",
-  speaker: "zh_female_shuangkuaisisi_moon_bigtts",
-  endpoint: "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
-  sample_rate: "24000",
-  speech_rate: "0",
-  concurrency: "4",
-  uid: "youdub-webui",
-}
-
 afterEach(() => {
   cleanup()
   window.localStorage.clear()
@@ -60,9 +45,6 @@ describe("设置分项保存反馈", () => {
       }
       if (method === "GET" && path === "/api/settings/output") {
         return jsonResponse({ output_dir: "D:/YouDubExports" })
-      }
-      if (method === "GET" && path === "/api/settings/volcengine-tts") {
-        return jsonResponse(defaultVolcengine)
       }
       if (method === "GET" && path === "/api/settings/azure-tts") {
         return jsonResponse({
@@ -97,9 +79,6 @@ describe("设置分项保存反馈", () => {
       }
       if (method === "POST" && path === "/api/settings/output") {
         return jsonResponse({ output_dir: "D:/YouDubExports" })
-      }
-      if (method === "POST" && path === "/api/settings/volcengine-tts") {
-        return jsonResponse(defaultVolcengine)
       }
       if (method === "POST" && path === "/api/settings/azure-tts") {
         return jsonResponse({
@@ -144,7 +123,6 @@ describe("设置分项保存反馈", () => {
     expect(results).toHaveTextContent("OpenAI 设置: 保存成功")
     expect(results).toHaveTextContent("yt-dlp 设置: 保存失败 (HTTP 422)")
     expect(results).toHaveTextContent("输出设置: 保存成功")
-    expect(results).toHaveTextContent("火山引擎 TTS 设置: 保存成功")
     expect(results).toHaveTextContent("Azure TTS 设置: 保存成功")
     expect(results).not.toHaveTextContent("cookie-secret")
     expect(results).not.toHaveTextContent("sk-secret")
@@ -161,7 +139,6 @@ describe("设置分项保存反馈", () => {
       "/api/settings/openai",
       "/api/settings/ytdlp",
       "/api/settings/output",
-      "/api/settings/volcengine-tts",
       "/api/settings/azure-tts",
     ])
 
@@ -170,7 +147,6 @@ describe("设置分项保存反馈", () => {
       "/api/settings/openai",
       "/api/settings/ytdlp",
       "/api/settings/output",
-      "/api/settings/volcengine-tts",
       "/api/settings/azure-tts",
     ]) {
       const getCount = mocks.fetch.mock.calls.filter(
@@ -185,5 +161,63 @@ describe("设置分项保存反馈", () => {
     ).join("\n")
     expect(sensitiveInputValues).not.toContain("cookie-secret")
     expect(sensitiveInputValues).not.toContain("sk-secret")
+  })
+
+  it("Azure 密钥框回车换行时保留上一行内容", async () => {
+    mocks.fetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      const method = init?.method || "GET"
+      if (method === "GET" && path === "/api/cookies/youtube") {
+        return jsonResponse({ exists: false, size: 0, updated_at: 0, content: "" })
+      }
+      if (method === "GET" && path === "/api/settings/openai") {
+        return jsonResponse({
+          base_url: "https://api.openai.com/v1",
+          api_key: "",
+          has_api_key: false,
+          model: "gpt-4o-mini",
+          translate_concurrency: "8",
+        })
+      }
+      if (method === "GET" && path === "/api/settings/ytdlp") {
+        return jsonResponse({ proxy_port: "7890" })
+      }
+      if (method === "GET" && path === "/api/settings/output") {
+        return jsonResponse({ output_dir: "D:/YouDubExports" })
+      }
+      if (method === "GET" && path === "/api/settings/azure-tts") {
+        return jsonResponse({
+          subscription_key: "********",
+          has_subscription_key: true,
+          key_count: 1,
+          region: "eastasia",
+          voice: "zh-CN-XiaoxiaoNeural",
+          locale: "zh-CN",
+          endpoint: "",
+          output_format: "audio-24khz-48kbitrate-mono-mp3",
+          speech_rate: "0",
+          concurrency: "4",
+        })
+      }
+      throw new Error(`未预期的请求: ${method} ${path}`)
+    })
+    vi.stubGlobal("fetch", mocks.fetch)
+
+    const user = userEvent.setup()
+    render(
+      <LanguageProvider>
+        <SettingsDialog />
+      </LanguageProvider>,
+    )
+
+    await user.click(screen.getByRole("button", { name: "设置" }))
+    const keyInput = await screen.findByLabelText("订阅密钥（可多个）")
+    await waitFor(() => {
+      expect(keyInput).toHaveValue("")
+      expect(screen.getByText("已保存密钥数：1")).toBeInTheDocument()
+    })
+
+    await user.type(keyInput, "azure-key-one{Enter}azure-key-two")
+    expect(keyInput).toHaveValue("azure-key-one\nazure-key-two")
   })
 })

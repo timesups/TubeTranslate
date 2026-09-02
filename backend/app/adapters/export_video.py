@@ -109,12 +109,6 @@ def export_final_video(
     video_destination = dest_dir / f"{stem}.mp4"
     shutil.copy2(final_video, video_destination)
 
-    subtitle_destination: Path | None = None
-    subtitle_source = resolve_chinese_subtitle(final_video, session=session)
-    if subtitle_source is not None and subtitle_source.exists():
-        subtitle_destination = dest_dir / f"{stem}.srt"
-        shutil.copy2(subtitle_source, subtitle_destination)
-
     description_destination: Path | None = None
     meta: dict[str, Any] | None
     if isinstance(bilibili_meta, dict):
@@ -137,6 +131,6 @@ def export_final_video(
 
     return ExportResult(
         video=video_destination,
-        subtitle=subtitle_destination,
+        subtitle=None,
         description=description_destination,
     )

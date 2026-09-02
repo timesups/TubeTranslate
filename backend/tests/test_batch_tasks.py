@@ -21,7 +21,7 @@ def test_create_tasks_batch_creates_multiple_and_reports_partial_errors(monkeypa
             ],
             "execution_mode": "manual",
             "audio_mode": "replace",
-            "tts_provider": "volcengine",
+            "tts_provider": "azure",
         },
     )
 
@@ -34,7 +34,7 @@ def test_create_tasks_batch_creates_multiple_and_reports_partial_errors(monkeypa
     assert sorted(enqueued) == ["batchvid001", "batchvid002"]
     assert body["created"][0]["task"]["execution_mode"] == "manual"
     assert body["created"][0]["task"]["audio_mode"] == "replace"
-    assert body["created"][0]["task"]["tts_provider"] == "volcengine"
+    assert body["created"][0]["task"]["tts_provider"] == "azure"
 
 
 def test_create_tasks_batch_marks_already_existing(monkeypatch, tmp_path):

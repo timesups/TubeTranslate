@@ -13,18 +13,22 @@ from .config import (
     azure_tts_defaults,
     openai_defaults,
     output_defaults,
-    volcengine_tts_defaults,
     ytdlp_defaults,
 )
 from .stages import STAGES
 
 
 ACTIVE_STATUSES = ("queued", "running")
+PAUSABLE_STATUSES = ("queued", "running")
+
+
+class PauseRequested(Exception):
+    """Raised when a user-requested pause should stop the current runner."""
 EXECUTION_MODES = ("auto", "manual")
 DEFAULT_EXECUTION_MODE = "auto"
 AUDIO_MODES = ("keep_bgm", "replace")
 DEFAULT_AUDIO_MODE = "replace"
-TTS_PROVIDERS = ("voxcpm", "volcengine", "azure")
+TTS_PROVIDERS = ("voxcpm", "azure")
 DEFAULT_TTS_PROVIDER = "azure"
 DEFAULT_BILIBILI_TID = 229  # 知识区 · 设计·创意
 DEFAULT_BILIBILI_AUTO_PUBLISH = True
@@ -131,11 +135,6 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
                 (f"output.{key}", value, now_iso()),
             )
-        for key, value in volcengine_tts_defaults().items():
-            conn.execute(
-                "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-                (f"volcengine_tts.{key}", value, now_iso()),
-            )
         for key, value in azure_tts_defaults().items():
             conn.execute(
                 "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
@@ -167,6 +166,10 @@ def init_db() -> None:
         if "bilibili_generate_meta" not in task_columns:
             conn.execute(
                 "ALTER TABLE tasks ADD COLUMN bilibili_generate_meta INTEGER NOT NULL DEFAULT 1"
+            )
+        if "pause_requested" not in task_columns:
+            conn.execute(
+                "ALTER TABLE tasks ADD COLUMN pause_requested INTEGER NOT NULL DEFAULT 0"
             )
         stage_columns = {row["name"] for row in conn.execute("PRAGMA table_info(task_stages)").fetchall()}
         if "progress" not in stage_columns:
@@ -379,6 +382,9 @@ def normalize_audio_mode(value: str | None) -> str:
 
 def normalize_tts_provider(value: str | None) -> str:
     provider = (value or DEFAULT_TTS_PROVIDER).strip().lower()
+    # Legacy Doubao / Volcengine provider is removed; map existing tasks to Azure.
+    if provider == "volcengine":
+        return DEFAULT_TTS_PROVIDER
     if provider not in TTS_PROVIDERS:
         raise ValueError(f"tts_provider must be one of: {', '.join(TTS_PROVIDERS)}")
     return provider
@@ -440,6 +446,8 @@ def _serialize_task_fields(data: dict[str, Any]) -> dict[str, Any]:
         data["bilibili_auto_publish"] = bool(data["bilibili_auto_publish"])
     if "bilibili_generate_meta" in data:
         data["bilibili_generate_meta"] = bool(data["bilibili_generate_meta"])
+    if "pause_requested" in data:
+        data["pause_requested"] = bool(data["pause_requested"])
     return data
 
 
@@ -672,11 +680,53 @@ def queue_task_for_continue(task_id: str) -> None:
         conn.execute(
             """
             UPDATE tasks
-            SET status = 'queued', error_message = NULL, completed_at = NULL
+            SET status = 'queued', error_message = NULL, completed_at = NULL, pause_requested = 0
             WHERE id = ?
             """,
             (task_id,),
         )
+
+
+def apply_task_pause(task_id: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'paused', pause_requested = 0
+            WHERE id = ?
+            """,
+            (task_id,),
+        )
+
+
+def request_task_pause(task_id: str) -> bool:
+    task = get_task(task_id)
+    if not task or task["status"] not in PAUSABLE_STATUSES:
+        return False
+    if task["status"] == "queued":
+        apply_task_pause(task_id)
+        return True
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE tasks
+            SET pause_requested = 1
+            WHERE id = ? AND status = 'running'
+            """,
+            (task_id,),
+        )
+    return cursor.rowcount > 0
+
+
+def raise_if_task_pause_requested(task_id: str) -> None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT pause_requested FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+    if row and row["pause_requested"]:
+        apply_task_pause(task_id)
+        raise PauseRequested()
 
 
 def reset_stages_from(task_id: str, from_stage: str) -> None:
@@ -886,83 +936,6 @@ def save_output_settings(output_dir: str) -> None:
     set_setting("output.output_dir", output_dir.strip().strip('"').strip("'"))
 
 
-def get_volcengine_tts_settings() -> dict[str, str]:
-    defaults = volcengine_tts_defaults()
-    keys = {key: f"volcengine_tts.{key}" for key in defaults}
-    placeholders = ", ".join("?" for _ in keys)
-    with connect() as conn:
-        rows = conn.execute(
-            f"SELECT key, value FROM settings WHERE key IN ({placeholders})",
-            tuple(keys.values()),
-        ).fetchall()
-    saved = {row["key"]: row["value"] for row in rows}
-    return {
-        key: saved.get(setting_key, defaults[key])
-        for key, setting_key in keys.items()
-    }
-
-
-def save_volcengine_tts_settings(
-    *,
-    app_id: str,
-    access_key: str = "",
-    clear_access_key: bool = False,
-    api_key: str = "",
-    clear_api_key: bool = False,
-    resource_id: str,
-    speaker: str,
-    endpoint: str = "",
-    sample_rate: str = "",
-    speech_rate: str = "",
-    concurrency: str = "",
-    uid: str = "",
-) -> None:
-    defaults = volcengine_tts_defaults()
-    cleaned_access_key = access_key.strip()
-    cleaned_api_key = api_key.strip()
-    has_explicit_access_key = bool(cleaned_access_key) and set(cleaned_access_key) != {"*"}
-    has_explicit_api_key = bool(cleaned_api_key) and set(cleaned_api_key) != {"*"}
-    updated_at = now_iso()
-
-    updates = {
-        "volcengine_tts.app_id": app_id.strip(),
-        "volcengine_tts.resource_id": resource_id.strip() or defaults["resource_id"],
-        "volcengine_tts.speaker": speaker.strip() or defaults["speaker"],
-        "volcengine_tts.endpoint": (
-            endpoint.strip() or defaults["endpoint"]
-        ),
-        "volcengine_tts.sample_rate": (
-            sample_rate.strip() or defaults["sample_rate"]
-        ),
-        "volcengine_tts.speech_rate": (
-            speech_rate.strip() if speech_rate.strip() != "" else defaults["speech_rate"]
-        ),
-        "volcengine_tts.concurrency": (
-            concurrency.strip() or defaults["concurrency"]
-        ),
-        "volcengine_tts.uid": uid.strip() or defaults["uid"],
-    }
-    if clear_access_key:
-        updates["volcengine_tts.access_key"] = ""
-    elif has_explicit_access_key:
-        updates["volcengine_tts.access_key"] = cleaned_access_key
-    if clear_api_key:
-        updates["volcengine_tts.api_key"] = ""
-    elif has_explicit_api_key:
-        updates["volcengine_tts.api_key"] = cleaned_api_key
-
-    with connect() as conn:
-        conn.executemany(
-            """
-            INSERT INTO settings (key, value, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(key) DO UPDATE
-            SET value = excluded.value, updated_at = excluded.updated_at
-            """,
-            [(key, value, updated_at) for key, value in updates.items()],
-        )
-
-
 def get_azure_tts_settings() -> dict[str, str]:
     defaults = azure_tts_defaults()
     keys = {key: f"azure_tts.{key}" for key in defaults}
@@ -991,6 +964,8 @@ def save_azure_tts_settings(
     speech_rate: str = "",
     concurrency: str = "",
 ) -> None:
+    from .adapters.azure_tts import parse_subscription_keys
+
     defaults = azure_tts_defaults()
     cleaned_key = subscription_key.strip()
     has_explicit_key = bool(cleaned_key) and set(cleaned_key) != {"*"}
@@ -1020,7 +995,8 @@ def save_azure_tts_settings(
     if clear_subscription_key:
         updates["azure_tts.subscription_key"] = ""
     elif has_explicit_key:
-        updates["azure_tts.subscription_key"] = cleaned_key
+        keys = parse_subscription_keys(cleaned_key)
+        updates["azure_tts.subscription_key"] = "\n".join(keys)
 
     with connect() as conn:
         conn.executemany(

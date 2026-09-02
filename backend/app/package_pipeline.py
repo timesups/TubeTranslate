@@ -13,6 +13,10 @@ from .sources import detect_source
 from .stages import PACKAGE_STAGES
 
 
+class PackageDeletedError(Exception):
+    """Raised when a package record is removed while the worker is still running."""
+
+
 def _write_package_log(package_id: str, message: str) -> None:
     path = package_db.log_path(package_id)
     timestamp = database.now_iso()
@@ -39,7 +43,7 @@ class PackageItemPipelineRunner(PipelineRunner):
         loaded_item = package_db.get_package_item(self.item["id"])
         loaded_package = package_db.get_package(self.item["package_id"])
         if loaded_item is None or loaded_package is None:
-            raise RuntimeError("Package item context is missing.")
+            raise PackageDeletedError(self.item["package_id"])
         self.item = loaded_item
         self.package = loaded_package
         return package_db.synthesize_task_dict(self.item, self.package)
@@ -52,6 +56,10 @@ class PackageItemPipelineRunner(PipelineRunner):
         self.log(f"[{stage}] {message}")
 
     def stage_progress(self, stage: str, progress: int, message: str, *, force: bool = False) -> None:
+        package_db.raise_if_package_pause_requested(
+            self.package["id"],
+            item_id=self.item["id"],
+        )
         bounded = max(0, min(100, int(progress)))
         from time import monotonic
 
@@ -103,24 +111,19 @@ class PackageItemPipelineRunner(PipelineRunner):
     def _merge_video(self, task: dict) -> None:
         super()._merge_video(task)
         final_video = _require(self.artifacts.final_video, "final_video")
-        exported_video, exported_subtitle = export_package_item(
+        exported_video = export_package_item(
             final_video=final_video,
             source_path=Path(self.item["source_path"]),
             output_suffix=self.package["output_suffix"],
-            export_subtitle=bool(self.package.get("export_subtitle")),
             session=self.artifacts.session,
         )
         package_db.update_package_item(
             self.item["id"],
             final_video_path=str(final_video),
             exported_video_path=str(exported_video),
-            exported_subtitle_path=str(exported_subtitle) if exported_subtitle else None,
+            exported_subtitle_path=None,
         )
-        self.stage_message(
-            "merge_video",
-            f"Exported -> {exported_video}"
-            + (f", subtitles -> {exported_subtitle}" if exported_subtitle else ""),
-        )
+        self.stage_message("merge_video", f"Exported -> {exported_video}")
 
     def run(self) -> None:
         task = self._refresh()
@@ -147,6 +150,12 @@ class PackageItemPipelineRunner(PipelineRunner):
             validate_runtime_device()
             self.log(f"Device plan: {device_plan_summary()}")
             for stage in PACKAGE_STAGES:
+                if not package_db.package_exists(self.package["id"]):
+                    raise PackageDeletedError(self.package["id"])
+                package_db.raise_if_package_pause_requested(
+                    self.package["id"],
+                    item_id=self.item["id"],
+                )
                 if self._stage_status(stage.name) == "succeeded":
                     package_db.update_package_item(self.item["id"], current_stage=stage.name)
                     package_db.update_package_item_stage(self.item["id"], stage.name, progress=100)
@@ -154,6 +163,10 @@ class PackageItemPipelineRunner(PipelineRunner):
                     self.log(f"[{stage.name}] Reused cached output")
                     continue
                 self._run_package_stage(stage.name)
+                package_db.raise_if_package_pause_requested(
+                    self.package["id"],
+                    item_id=self.item["id"],
+                )
                 if execution_mode == "manual" and stage != PACKAGE_STAGES[-1]:
                     package_db.update_package_item(self.item["id"], status="paused")
                     package_db.update_package(self.package["id"], status="paused")
@@ -166,6 +179,11 @@ class PackageItemPipelineRunner(PipelineRunner):
                 completed_at=database.now_iso(),
             )
             self.log("Item succeeded")
+        except PackageDeletedError:
+            raise
+        except database.PauseRequested:
+            self.log("Paused by user")
+            raise
         except Exception as exc:
             refreshed = package_db.get_package_item(self.item["id"]) or self.item
             failed_stage = refreshed.get("current_stage")
@@ -264,9 +282,21 @@ def run_package(package_id: str) -> None:
     package = package_db.get_package(package_id)
     if package is None:
         return
-    if package["status"] not in ("queued", "paused", "running", "partial"):
+    if package["status"] == "paused":
+        return
+    if package["status"] not in ("queued", "running", "partial"):
         return
 
+    try:
+        _run_package_body(package_id, package)
+    except PackageDeletedError:
+        return
+    except database.PauseRequested:
+        _write_package_log(package_id, "Paused by user")
+        return
+
+
+def _run_package_body(package_id: str, package: dict) -> None:
     if package["status"] in ("queued", "partial"):
         updates = {"status": "running"}
         if not package.get("started_at"):
@@ -281,6 +311,9 @@ def run_package(package_id: str) -> None:
     try:
         validate_runtime_device()
         for item in package.get("items") or []:
+            if not package_db.package_exists(package_id):
+                raise PackageDeletedError(package_id)
+            package_db.raise_if_package_pause_requested(package_id)
             refreshed = package_db.get_package(package_id) or package
             if refreshed["status"] == "paused":
                 _write_package_log(package_id, "Package paused")
@@ -321,6 +354,10 @@ def run_package(package_id: str) -> None:
             runner = PackageItemPipelineRunner(current, package)
             try:
                 runner.run()
+            except PackageDeletedError:
+                raise
+            except database.PauseRequested:
+                raise
             except Exception:
                 if not continue_on_error:
                     _finalize_package_status(package_id)
@@ -331,7 +368,13 @@ def run_package(package_id: str) -> None:
                 return
         _finalize_package_status(package_id)
         _write_package_log(package_id, "Package finished")
+    except PackageDeletedError:
+        raise
+    except database.PauseRequested:
+        raise
     except Exception as exc:
+        if not package_db.package_exists(package_id):
+            return
         package_db.update_package(
             package_id,
             status="failed",

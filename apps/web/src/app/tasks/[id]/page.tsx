@@ -9,6 +9,7 @@ import {
   FileText,
   FolderMinus,
   Loader2,
+  Pause,
   Play,
   RotateCw,
   Trash2,
@@ -27,6 +28,7 @@ import {
   getTask,
   getTaskLog,
   isAbortError,
+  pauseTask,
   redoStage,
   rerunTask,
   resumeTask,
@@ -109,6 +111,8 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
   const [resumeError, setResumeError] = useState("")
   const [continuing, setContinuing] = useState(false)
   const [continueError, setContinueError] = useState("")
+  const [pausing, setPausing] = useState(false)
+  const [pauseError, setPauseError] = useState("")
   const [redoingStage, setRedoingStage] = useState<string | null>(null)
   const [redoConfirmStage, setRedoConfirmStage] = useState<string | null>(null)
   const [redoError, setRedoError] = useState("")
@@ -207,6 +211,21 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
     }
   }
 
+  const handlePause = async () => {
+    invalidatePolling()
+    setPausing(true)
+    setPauseError("")
+    try {
+      const next = await pauseTask(id)
+      invalidatePolling()
+      setTask(next)
+    } catch (err) {
+      setPauseError(err instanceof Error ? err.message : t.task.pauseError)
+    } finally {
+      setPausing(false)
+    }
+  }
+
   const handleRedoStage = async (stageName: string) => {
     invalidatePolling()
     setRedoingStage(stageName)
@@ -235,6 +254,8 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
   const isFailed = task?.status === "failed"
   const isPaused = task?.status === "paused"
   const isManual = task?.execution_mode === "manual"
+  const canPause = isRunning || isQueued
+  const pausePending = Boolean(task?.pause_requested)
   const canRedoStage = isManual && !isRunning && !isQueued
   const redoConfirmStageInfo = task?.stages.find((stage) => stage.name === redoConfirmStage)
 
@@ -261,7 +282,28 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
           <CardHeader className="gap-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <CardTitle>{t.task.overview}</CardTitle>
-              <Badge className={statusBadgeClass(task?.status)}>{statusLabel(task?.status)}</Badge>
+              <div className="flex flex-wrap items-center gap-2">
+                {canPause ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handlePause}
+                    disabled={pausing || pausePending}
+                  >
+                    {pausing || pausePending ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Pause className="size-4" />
+                    )}
+                    {pausing
+                      ? t.task.pausing
+                      : pausePending
+                        ? t.task.pausingRequested
+                        : t.task.pauseTask}
+                  </Button>
+                ) : null}
+                <Badge className={statusBadgeClass(task?.status)}>{statusLabel(task?.status)}</Badge>
+              </div>
             </div>
             <Progress value={progress} />
           </CardHeader>
@@ -298,11 +340,7 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                 </dd>
                 <dt className="text-muted-foreground">{t.task.ttsProvider}</dt>
                 <dd>
-                  {task.tts_provider === "volcengine"
-                    ? t.task.ttsVolcengine
-                    : task.tts_provider === "azure"
-                      ? t.task.ttsAzure
-                      : t.task.ttsVoxcpm}
+                  {task.tts_provider === "azure" ? t.task.ttsAzure : t.task.ttsVoxcpm}
                 </dd>
                 <dt className="text-muted-foreground">{t.task.bilibiliTid}</dt>
                 <dd>{bilibiliPartitionLabel(task.bilibili_tid ?? 229)}</dd>
@@ -456,20 +494,37 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
             </Dialog>
             {isPaused ? (
               <div className="mt-4 space-y-3 rounded-lg border border-sky-500/30 bg-sky-950/40 px-3 py-3">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <p className="text-sm text-sky-200">{t.task.continueHelp}</p>
-                  <Button onClick={() => handleContinue()} disabled={continuing}>
-                    {continuing ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-                    {continuing ? t.task.continuing : t.task.continueTask}
-                  </Button>
-                </div>
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <p className="text-sm text-sky-200">{t.task.continueAutoHelp}</p>
-                  <Button variant="outline" onClick={() => handleContinue("auto")} disabled={continuing}>
-                    {continuing ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-                    {continuing ? t.task.continuing : t.task.continueAutoTask}
-                  </Button>
-                </div>
+                {isManual ? (
+                  <>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <p className="text-sm text-sky-200">{t.task.continueHelp}</p>
+                      <Button onClick={() => handleContinue()} disabled={continuing}>
+                        {continuing ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
+                        {continuing ? t.task.continuing : t.task.continueTask}
+                      </Button>
+                    </div>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <p className="text-sm text-sky-200">{t.task.continueAutoHelp}</p>
+                      <Button variant="outline" onClick={() => handleContinue("auto")} disabled={continuing}>
+                        {continuing ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
+                        {continuing ? t.task.continuing : t.task.continueAutoTask}
+                      </Button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <p className="text-sm text-sky-200">{t.task.resumePausedHelp}</p>
+                    <Button onClick={() => handleContinue()} disabled={continuing}>
+                      {continuing ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
+                      {continuing ? t.task.continuing : t.task.resumePausedTask}
+                    </Button>
+                  </div>
+                )}
+              </div>
+            ) : null}
+            {pauseError ? (
+              <div className="mt-2 rounded-lg border border-red-500/30 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+                {pauseError}
               </div>
             ) : null}
             {continueError ? (

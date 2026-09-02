@@ -98,7 +98,7 @@ class TaskPackageCreate(TaskPackageScan):
     execution_mode: str = "auto"
     audio_mode: str = "replace"
     tts_provider: str = "azure"
-    export_subtitle: bool = True
+    export_subtitle: bool = False
     continue_on_error: bool = True
 
 
@@ -110,6 +110,10 @@ class TaskBatchDelete(BaseModel):
     task_ids: list[str]
 
 
+class PackageBatchRequest(BaseModel):
+    package_ids: list[str]
+
+
 class ContinueTaskRequest(BaseModel):
     execution_mode: str | None = None
 
@@ -118,6 +122,7 @@ MAX_BATCH_TASK_URLS = 50
 MAX_BATCH_DELETE_TASKS = 200
 MAX_BATCH_RESUME_TASKS = 200
 MAX_BATCH_CLEANUP_TASKS = 200
+MAX_BATCH_PACKAGE_OPS = 200
 
 
 class YouTubeCookieUpdate(BaseModel):
@@ -145,21 +150,6 @@ class OutputSettingsUpdate(BaseModel):
     output_dir: str = ""
 
 
-class VolcengineTtsSettingsUpdate(BaseModel):
-    app_id: str = ""
-    access_key: str = ""
-    clear_access_key: bool = False
-    api_key: str = ""
-    clear_api_key: bool = False
-    resource_id: str = "seed-tts-2.0"
-    speaker: str = ""
-    endpoint: str = ""
-    sample_rate: str = "24000"
-    speech_rate: str = "0"
-    concurrency: str = "4"
-    uid: str = ""
-
-
 class AzureTtsSettingsUpdate(BaseModel):
     subscription_key: str = ""
     clear_subscription_key: bool = False
@@ -173,6 +163,12 @@ class AzureTtsSettingsUpdate(BaseModel):
 
 
 class AzureTtsVoicesRequest(BaseModel):
+    region: str = ""
+    subscription_key: str = ""
+    endpoint: str = ""
+
+
+class AzureTtsValidateKeysRequest(BaseModel):
     region: str = ""
     subscription_key: str = ""
     endpoint: str = ""
@@ -223,7 +219,7 @@ def normalize_translate_concurrency(value: str) -> str:
     return concurrency
 
 
-def normalize_volcengine_tts_concurrency(value: str) -> str:
+def normalize_tts_concurrency(value: str) -> str:
     concurrency = value.strip()
     if not concurrency:
         return ""
@@ -238,7 +234,7 @@ def normalize_volcengine_tts_concurrency(value: str) -> str:
 
 
 def normalize_azure_tts_concurrency(value: str) -> str:
-    return normalize_volcengine_tts_concurrency(value)
+    return normalize_tts_concurrency(value)
 
 
 @asynccontextmanager
@@ -734,36 +730,198 @@ def continue_task_package(package_id: str, payload: TaskPackageContinue | None =
     return refreshed or package
 
 
+@app.post("/api/task-packages/{package_id}/pause")
+def pause_task_package(package_id: str) -> dict:
+    package = package_db.get_package(package_id)
+    if package is None:
+        raise HTTPException(status_code=404, detail="Package not found.")
+    if not package_db.request_package_pause(package_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Only queued or running packages can be paused.",
+        )
+    refreshed = package_db.get_package(package_id)
+    return refreshed or package
+
+
 @app.post("/api/task-packages/{package_id}/retry-failed")
 def retry_failed_task_package(package_id: str) -> dict:
     package = package_db.get_package(package_id)
     if package is None:
         raise HTTPException(status_code=404, detail="Package not found.")
+    if package["status"] in ("running", "queued"):
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot retry failed items while the package is still queued or running.",
+        )
     reset_count = package_db.reset_failed_package_items(package_id)
     if reset_count <= 0:
         raise HTTPException(status_code=409, detail="No failed items to retry.")
     worker.enqueue_package(package_id)
     refreshed = package_db.get_package(package_id)
-    return refreshed or package
+    payload = refreshed or package
+    payload["retried_count"] = reset_count
+    return payload
 
 
-@app.delete("/api/task-packages/{package_id}")
-def delete_task_package(package_id: str) -> dict:
+def _purge_package(package_id: str) -> bool:
     package = package_db.get_package(package_id)
     if package is None:
-        raise HTTPException(status_code=404, detail="Package not found.")
-    if package["status"] in ("running", "queued"):
-        raise HTTPException(status_code=409, detail="Cannot delete a running or queued package.")
-    deleted = package_db.delete_package(package_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Package not found.")
+        return False
+    for item in package.get("items") or []:
+        item_log = package_db.item_log_path(item["id"])
+        if item_log.exists():
+            item_log.unlink(missing_ok=True)
     session_root = WORKFOLDER / "packages" / package_id
     if session_root.exists():
         shutil.rmtree(session_root, ignore_errors=True)
     log_file = package_db.log_path(package_id)
     if log_file.exists():
         log_file.unlink(missing_ok=True)
+    return package_db.delete_package(package_id)
+
+
+def _cleanup_package_files(package_id: str) -> dict[str, Any]:
+    """Remove on-disk artifacts for a package while keeping the DB record and log."""
+    package = package_db.get_package(package_id)
+    if package is None:
+        raise ValueError("Package not found.")
+    removed: list[str] = []
+    warnings: list[str] = []
+    session_root = WORKFOLDER / "packages" / package_id
+    if session_root.exists():
+        try:
+            shutil.rmtree(session_root)
+            removed.append(str(session_root))
+        except OSError as exc:
+            warnings.append(f"session remove failed: {exc}")
+            raise RuntimeError(
+                f"无法删除批处理会话目录（文件可能被占用）：{session_root} ({exc})"
+            ) from exc
+    for item in package.get("items") or []:
+        item_log = package_db.item_log_path(item["id"])
+        if item_log.exists():
+            try:
+                item_log.unlink(missing_ok=True)
+                removed.append(str(item_log))
+            except OSError as exc:
+                warnings.append(f"item log remove failed ({item['id']}): {exc}")
+        package_db.update_package_item(
+            item["id"],
+            session_path=None,
+            final_video_path=None,
+        )
+    return {"id": package_id, "removed": removed, "warnings": warnings}
+
+
+@app.delete("/api/task-packages/{package_id}")
+def delete_task_package(package_id: str) -> dict:
+    if not _purge_package(package_id):
+        raise HTTPException(status_code=404, detail="Package not found.")
     return {"deleted": True, "id": package_id}
+
+
+@app.post("/api/task-packages/batch-delete")
+def batch_delete_task_packages(payload: PackageBatchRequest) -> dict:
+    raw_ids = [str(package_id).strip() for package_id in payload.package_ids if str(package_id).strip()]
+    if not raw_ids:
+        raise HTTPException(status_code=422, detail="package_ids must not be empty.")
+    if len(raw_ids) > MAX_BATCH_PACKAGE_OPS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"At most {MAX_BATCH_PACKAGE_OPS} packages can be deleted at once.",
+        )
+    package_ids = list(dict.fromkeys(raw_ids))
+    deleted: list[str] = []
+    missing: list[str] = []
+    failed: list[dict[str, str]] = []
+    for package_id in package_ids:
+        try:
+            if _purge_package(package_id):
+                deleted.append(package_id)
+            else:
+                missing.append(package_id)
+        except Exception as exc:
+            logger.exception("Failed to delete package %s during batch delete", package_id)
+            failed.append({"id": package_id, "reason": str(exc)})
+    return {"deleted": deleted, "skipped": [], "missing": missing, "failed": failed}
+
+
+@app.post("/api/task-packages/batch-cleanup-files")
+def batch_cleanup_package_files(payload: PackageBatchRequest) -> dict:
+    raw_ids = [str(package_id).strip() for package_id in payload.package_ids if str(package_id).strip()]
+    if not raw_ids:
+        raise HTTPException(status_code=422, detail="package_ids must not be empty.")
+    if len(raw_ids) > MAX_BATCH_PACKAGE_OPS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"At most {MAX_BATCH_PACKAGE_OPS} packages can be cleaned at once.",
+        )
+    package_ids = list(dict.fromkeys(raw_ids))
+    cleaned: list[str] = []
+    skipped: list[dict[str, str]] = []
+    missing: list[str] = []
+    failed: list[dict[str, str]] = []
+    for package_id in package_ids:
+        package = package_db.get_package(package_id)
+        if not package:
+            missing.append(package_id)
+            continue
+        if package["status"] in ("running", "queued"):
+            skipped.append({"id": package_id, "reason": package["status"]})
+            continue
+        try:
+            _cleanup_package_files(package_id)
+            cleaned.append(package_id)
+        except Exception as exc:
+            logger.exception("Failed to clean files for package %s during batch cleanup", package_id)
+            failed.append({"id": package_id, "reason": str(exc)})
+    return {"cleaned": cleaned, "skipped": skipped, "missing": missing, "failed": failed}
+
+
+@app.post("/api/task-packages/batch-retry-failed")
+def batch_retry_failed_task_packages(payload: PackageBatchRequest) -> dict:
+    raw_ids = [str(package_id).strip() for package_id in payload.package_ids if str(package_id).strip()]
+    if not raw_ids:
+        raise HTTPException(status_code=422, detail="package_ids must not be empty.")
+    if len(raw_ids) > MAX_BATCH_PACKAGE_OPS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"At most {MAX_BATCH_PACKAGE_OPS} packages can be retried at once.",
+        )
+    package_ids = list(dict.fromkeys(raw_ids))
+    retried: list[str] = []
+    skipped: list[dict[str, str]] = []
+    missing: list[str] = []
+    failed: list[dict[str, str]] = []
+    candidates: list[str] = []
+    for package_id in package_ids:
+        package = package_db.get_package(package_id)
+        if not package:
+            missing.append(package_id)
+            continue
+        if package["status"] in ("running", "queued"):
+            skipped.append({"id": package_id, "reason": package["status"]})
+            continue
+        failed_count = int(package.get("failed_count") or 0)
+        if failed_count <= 0:
+            skipped.append({"id": package_id, "reason": "no_failed_items"})
+            continue
+        candidates.append(package_id)
+    if candidates:
+        _ensure_runtime_ready()
+    for package_id in candidates:
+        try:
+            reset_count = package_db.reset_failed_package_items(package_id)
+            if reset_count <= 0:
+                skipped.append({"id": package_id, "reason": "no_failed_items"})
+                continue
+            worker.enqueue_package(package_id)
+            retried.append(package_id)
+        except Exception as exc:
+            logger.exception("Failed to retry package %s during batch retry", package_id)
+            failed.append({"id": package_id, "reason": str(exc)})
+    return {"retried": retried, "skipped": skipped, "missing": missing, "failed": failed}
 
 
 def _clean_upload_filename(filename: str | None) -> str:
@@ -1302,14 +1460,26 @@ def continue_task(task_id: str, payload: ContinueTaskRequest | None = None) -> d
         raise HTTPException(status_code=404, detail="Task not found.")
     if task["status"] != "paused":
         raise HTTPException(status_code=409, detail="Only paused tasks can be continued.")
-    if (task.get("execution_mode") or database.DEFAULT_EXECUTION_MODE) != "manual":
-        raise HTTPException(status_code=409, detail="Only manual tasks can be continued step by step.")
     if payload and payload.execution_mode is not None:
         database.update_task(task_id, execution_mode=normalize_execution_mode(payload.execution_mode))
     _ensure_runtime_ready()
     database.queue_task_for_continue(task_id)
     worker.enqueue(task_id)
     return database.get_task(task_id)
+
+
+@app.post("/api/tasks/{task_id}/pause")
+def pause_task(task_id: str) -> dict:
+    task = database.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    if not database.request_task_pause(task_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Only queued or running tasks can be paused.",
+        )
+    refreshed = database.get_task(task_id)
+    return refreshed or task
 
 
 @app.post("/api/tasks/{task_id}/resume")
@@ -1450,65 +1620,16 @@ def save_output_settings(payload: OutputSettingsUpdate) -> dict:
     return get_output_settings()
 
 
-@app.get("/api/settings/volcengine-tts")
-def get_volcengine_tts_settings() -> dict:
-    settings = database.get_volcengine_tts_settings()
-    return {
-        "app_id": settings["app_id"],
-        "access_key": mask_secret(settings["access_key"]),
-        "has_access_key": bool(settings["access_key"]),
-        "api_key": mask_secret(settings["api_key"]),
-        "has_api_key": bool(settings["api_key"]),
-        "resource_id": settings["resource_id"],
-        "speaker": settings["speaker"],
-        "endpoint": settings["endpoint"],
-        "sample_rate": settings["sample_rate"],
-        "speech_rate": settings["speech_rate"],
-        "concurrency": settings["concurrency"],
-        "uid": settings["uid"],
-    }
-
-
-@app.post("/api/settings/volcengine-tts")
-def save_volcengine_tts_settings(payload: VolcengineTtsSettingsUpdate) -> dict:
-    sample_rate = payload.sample_rate.strip()
-    if sample_rate and not sample_rate.isdigit():
-        raise HTTPException(status_code=422, detail="Sample rate must be numeric.")
-    speech_rate = payload.speech_rate.strip()
-    if speech_rate:
-        try:
-            rate = int(speech_rate)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail="Speech rate must be numeric.") from exc
-        if rate < -50 or rate > 100:
-            raise HTTPException(
-                status_code=422,
-                detail="Speech rate must be between -50 and 100.",
-            )
-    concurrency = normalize_volcengine_tts_concurrency(payload.concurrency)
-    database.save_volcengine_tts_settings(
-        app_id=payload.app_id,
-        access_key=payload.access_key,
-        clear_access_key=payload.clear_access_key,
-        api_key=payload.api_key,
-        clear_api_key=payload.clear_api_key,
-        resource_id=payload.resource_id,
-        speaker=payload.speaker,
-        endpoint=payload.endpoint,
-        sample_rate=sample_rate,
-        speech_rate=speech_rate,
-        concurrency=concurrency,
-        uid=payload.uid,
-    )
-    return get_volcengine_tts_settings()
-
-
 @app.get("/api/settings/azure-tts")
 def get_azure_tts_settings() -> dict:
+    from .adapters.azure_tts import parse_subscription_keys
+
     settings = database.get_azure_tts_settings()
+    key_count = len(parse_subscription_keys(settings["subscription_key"]))
     return {
         "subscription_key": mask_secret(settings["subscription_key"]),
-        "has_subscription_key": bool(settings["subscription_key"]),
+        "has_subscription_key": key_count > 0,
+        "key_count": key_count,
         "region": settings["region"],
         "voice": settings["voice"],
         "locale": settings["locale"],
@@ -1580,3 +1701,30 @@ def list_azure_tts_voices(payload: AzureTtsVoicesRequest) -> dict:
             detail=f"Failed to list Azure voices: {exc}",
         ) from exc
     return {"voices": voices}
+
+
+@app.post("/api/settings/azure-tts/validate-keys")
+def validate_azure_tts_keys(payload: AzureTtsValidateKeysRequest) -> dict:
+    settings = database.get_azure_tts_settings()
+    subscription_key = payload.subscription_key.strip()
+    if not subscription_key or set(subscription_key) == {"*"}:
+        subscription_key = settings["subscription_key"]
+    region = payload.region.strip() or settings["region"]
+    endpoint = payload.endpoint.strip() or settings["endpoint"]
+    if not region and not endpoint:
+        raise HTTPException(status_code=422, detail="Azure region or endpoint is required.")
+    try:
+        from .adapters.azure_tts import validate_subscription_keys
+
+        return validate_subscription_keys(
+            region=region,
+            subscription_key=subscription_key,
+            endpoint=endpoint,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to validate Azure keys: {exc}",
+        ) from exc
