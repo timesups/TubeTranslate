@@ -22,7 +22,7 @@ from .adapters.local_subtitles import parse_srt, uploaded_subtitle_dir
 from .adapters.local_video import remove_upload, uploaded_video_dir
 from .adapters.openai_client import validate_openai_base_url
 from .adapters.openai_translate import list_models as list_openai_models
-from .config import WORKFOLDER, YOUTUBE_COOKIE_PATH, ensure_runtime_dirs, package_output_suffix
+from .config import WORKFOLDER, YOUTUBE_COOKIE_PATH, ensure_runtime_dirs, package_export_dir_name
 from .package_tasks import scan_source_dir, validate_source_dir
 from . import package_db
 from .pipeline import run_task
@@ -615,32 +615,29 @@ def create_tasks_batch(payload: TaskBatchCreate) -> dict:
     }
 
 
-def _normalize_package_suffix(value: str | None) -> str:
-    suffix = (value if value is not None else package_output_suffix()).strip()
-    if not suffix:
-        raise HTTPException(status_code=422, detail="output_suffix must not be empty.")
-    if any(ch in suffix for ch in ('/', '\\', ':', '*', '?', '"', '<', '>', '|')):
-        raise HTTPException(status_code=422, detail="output_suffix contains invalid characters.")
-    return suffix
+def _normalize_package_export_dir(value: str | None = None) -> str:
+    folder = (value if value is not None else package_export_dir_name()).strip() or package_export_dir_name()
+    if any(ch in folder for ch in ('/', '\\', ':', '*', '?', '"', '<', '>', '|')):
+        raise HTTPException(status_code=422, detail="export directory name contains invalid characters.")
+    return folder
 
 
 @app.post("/api/task-packages/scan")
 def scan_task_package(payload: TaskPackageScan) -> dict:
     try:
         source_dir = validate_source_dir(payload.source_dir)
-        suffix = _normalize_package_suffix(payload.output_suffix)
+        export_dir = _normalize_package_export_dir(package_export_dir_name())
         files = scan_source_dir(
             source_dir,
             glob=payload.glob,
             recursive=payload.recursive,
             skip_if_export_exists=payload.skip_if_export_exists,
-            output_suffix=suffix,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {
         "source_dir": str(source_dir),
-        "output_suffix": suffix,
+        "output_suffix": export_dir,
         "count": len(files),
         "files": files,
     }
@@ -650,7 +647,7 @@ def scan_task_package(payload: TaskPackageScan) -> dict:
 def create_task_package(payload: TaskPackageCreate) -> dict:
     try:
         source_dir = validate_source_dir(payload.source_dir)
-        suffix = _normalize_package_suffix(payload.output_suffix)
+        export_dir = _normalize_package_export_dir(package_export_dir_name())
         direction = package_db.normalize_direction(payload.direction)
         execution_mode = database.normalize_execution_mode(payload.execution_mode)
         audio_mode = database.normalize_audio_mode(payload.audio_mode)
@@ -660,7 +657,6 @@ def create_task_package(payload: TaskPackageCreate) -> dict:
             glob=payload.glob,
             recursive=payload.recursive,
             skip_if_export_exists=payload.skip_if_export_exists,
-            output_suffix=suffix,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -674,7 +670,7 @@ def create_task_package(payload: TaskPackageCreate) -> dict:
     package_id = package_db.create_package(
         name=package_name,
         source_root=str(source_dir),
-        output_suffix=suffix,
+        output_suffix=export_dir,
         direction=direction,
         execution_mode=execution_mode,
         audio_mode=audio_mode,

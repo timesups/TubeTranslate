@@ -21,14 +21,22 @@ def test_scan_source_dir_finds_videos(tmp_path):
     (tmp_path / "b.txt").write_bytes(b"txt")
     (tmp_path / "nested").mkdir()
     (tmp_path / "nested" / "c.mkv").write_bytes(b"mkv")
+    translate = tmp_path / "Translate"
+    translate.mkdir()
+    (translate / "a.mp4").write_bytes(b"exported")
 
-    items = package_tasks.scan_source_dir(tmp_path, recursive=False, output_suffix="_译制")
+    items = package_tasks.scan_source_dir(tmp_path, recursive=False)
     assert len(items) == 1
     assert items[0]["title"] == "a"
-    assert str(items[0]["export_path"]).endswith("a_译制.mp4")
+    assert Path(str(items[0]["export_path"])) == tmp_path / "Translate" / "a.mp4"
+
+    recursive_items = package_tasks.scan_source_dir(tmp_path, recursive=True)
+    assert {item["title"] for item in recursive_items} == {"a", "c"}
+    nested_item = next(item for item in recursive_items if item["title"] == "c")
+    assert Path(str(nested_item["export_path"])) == tmp_path / "nested" / "Translate" / "c.mkv"
 
 
-def test_export_package_item_writes_next_to_source(tmp_path):
+def test_export_package_item_writes_into_translate_folder(tmp_path):
     source = tmp_path / "clip.mp4"
     source.write_bytes(b"src")
     final_video = tmp_path / "session" / "media" / "video_final.mp4"
@@ -41,13 +49,13 @@ def test_export_package_item_writes_next_to_source(tmp_path):
     exported_video = package_tasks.export_package_item(
         final_video=final_video,
         source_path=source,
-        output_suffix="_译制",
         session=tmp_path / "session",
     )
 
-    assert exported_video == tmp_path / "clip_译制.mp4"
+    assert exported_video == tmp_path / "Translate" / "clip.mp4"
     assert exported_video.read_bytes() == b"final"
-    assert not (tmp_path / "clip_译制.srt").exists()
+    assert not (tmp_path / "clip_译制.mp4").exists()
+    assert not (tmp_path / "Translate" / "clip.srt").exists()
 
 
 def test_create_and_get_task_package(monkeypatch, tmp_path):
@@ -60,7 +68,7 @@ def test_create_and_get_task_package(monkeypatch, tmp_path):
     package_id = package_db.create_package(
         name="batch",
         source_root=str(source_dir),
-        output_suffix="_译制",
+        output_suffix="Translate",
         direction="en-zh",
         execution_mode="auto",
         audio_mode="replace",
@@ -91,7 +99,7 @@ def test_retry_failed_package_items_api(monkeypatch, tmp_path):
     package_id = package_db.create_package(
         name="retry-batch",
         source_root=str(source_dir),
-        output_suffix="_译制",
+        output_suffix="Translate",
         direction="en-zh",
         execution_mode="auto",
         audio_mode="replace",
@@ -182,7 +190,7 @@ def test_delete_running_task_package(monkeypatch, tmp_path):
     package_id = package_db.create_package(
         name="delete-me",
         source_root=str(source_dir),
-        output_suffix="_译制",
+        output_suffix="Translate",
         direction="en-zh",
         execution_mode="auto",
         audio_mode="replace",
@@ -221,7 +229,7 @@ def test_run_package_stops_when_package_deleted(monkeypatch, tmp_path):
     package_id = package_db.create_package(
         name="cancel-me",
         source_root=str(source_dir),
-        output_suffix="_译制",
+        output_suffix="Translate",
         direction="en-zh",
         execution_mode="auto",
         audio_mode="replace",
@@ -254,7 +262,7 @@ def test_pause_task_package_immediately_when_queued(monkeypatch, tmp_path):
     package_id = package_db.create_package(
         name="pause-batch",
         source_root=str(source_dir),
-        output_suffix="_译制",
+        output_suffix="Translate",
         direction="en-zh",
         execution_mode="auto",
         audio_mode="replace",
@@ -284,7 +292,7 @@ def test_batch_delete_and_retry_task_packages(monkeypatch, tmp_path):
     package_id = package_db.create_package(
         name="batch-ops",
         source_root=str(source_dir),
-        output_suffix="_译制",
+        output_suffix="Translate",
         direction="en-zh",
         execution_mode="auto",
         audio_mode="replace",

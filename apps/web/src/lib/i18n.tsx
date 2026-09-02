@@ -66,8 +66,9 @@ const messages: Record<UiLanguage, Messages> = {
       packageSectionTitle: "Folder batch (local)",
       packageSourceDirLabel: "Source folder on server",
       packageSourceDirHelp:
-        "Scan a directory accessible to the backend. Finished videos are written next to each source file with the suffix below. Bilibili stages are skipped.",
-      packageSuffixLabel: "Output suffix",
+        "Scan a directory accessible to the backend. Finished videos are written to a sibling Translate folder next to each source file (same filename, no suffix). Bilibili stages are skipped.",
+      packageSuffixLabel: "Export folder",
+      packageExportDirHelp: "Exports go to a Translate folder next to each source video.",
       packageRecursive: "Include subfolders",
       packageScan: "Preview scan",
       packageCreate: "Create batch task",
@@ -462,8 +463,9 @@ const messages: Record<UiLanguage, Messages> = {
       packageSectionTitle: "目录批处理（本地）",
       packageSourceDirLabel: "服务器上的源目录",
       packageSourceDirHelp:
-        "扫描后端可访问的目录。完成后会在每个源视频同目录写入带后缀的成片。不会执行 B 站简介与投稿。",
-      packageSuffixLabel: "输出后缀",
+        "扫描后端可访问的目录。完成后会在每个源视频同级新建 Translate 文件夹，并把成片以原文件名放入该目录（不再添加后缀）。不会执行 B 站简介与投稿。",
+      packageSuffixLabel: "导出目录",
+      packageExportDirHelp: "成片会写入源视频同级的 Translate 文件夹。",
       packageRecursive: "包含子目录",
       packageScan: "预览扫描",
       packageCreate: "创建批任务",

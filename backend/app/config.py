@@ -124,8 +124,14 @@ def merge_video_nvenc_preset() -> str:
     return value if value in allowed else "p4"
 
 
+def package_export_dir_name() -> str:
+    raw = (os.getenv("PACKAGE_EXPORT_DIR_NAME") or "Translate").strip()
+    return raw or "Translate"
+
+
 def package_output_suffix() -> str:
-    return (os.getenv("PACKAGE_OUTPUT_SUFFIX") or "_译制").strip() or "_译制"
+    # Kept for older env files; export now uses package_export_dir_name().
+    return package_export_dir_name()
 
 
 def package_continue_on_error() -> bool:

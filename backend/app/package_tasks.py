@@ -4,8 +4,7 @@ import shutil
 from fnmatch import fnmatch
 from pathlib import Path
 
-from . import config
-from .config import package_allowed_roots, package_max_items
+from .config import package_allowed_roots, package_export_dir_name, package_max_items
 
 DEFAULT_VIDEO_GLOBS = ("*.mp4", "*.mov", "*.mkv", "*.m4v", "*.webm", "*.avi", "*.flv", "*.wmv")
 
@@ -44,6 +43,16 @@ def _matches_glob(path: Path, globs: tuple[str, ...]) -> bool:
     return any(fnmatch(name, pattern) for pattern in globs)
 
 
+def _is_inside_translate_dir(path: Path, source_root: Path) -> bool:
+    """Skip videos already under a Translate output folder."""
+    translate_name = package_export_dir_name()
+    try:
+        relative = path.resolve().relative_to(source_root.resolve())
+    except ValueError:
+        return any(part == translate_name for part in path.parts)
+    return any(part == translate_name for part in relative.parts[:-1])
+
+
 def scan_source_dir(
     source_dir: Path,
     *,
@@ -52,6 +61,7 @@ def scan_source_dir(
     skip_if_export_exists: bool = False,
     output_suffix: str = "",
 ) -> list[dict[str, object]]:
+    _ = output_suffix  # kept for API compatibility; exports use Translate/ instead
     patterns = _parse_glob(glob)
     max_items = package_max_items()
     files: list[Path] = []
@@ -61,7 +71,10 @@ def scan_source_dir(
             continue
         if not _matches_glob(entry, patterns):
             continue
-        files.append(entry.resolve())
+        resolved = entry.resolve()
+        if _is_inside_translate_dir(resolved, source_dir):
+            continue
+        files.append(resolved)
         if len(files) > max_items:
             raise ValueError(f"At most {max_items} videos are allowed per package.")
     if not files:
@@ -70,7 +83,7 @@ def scan_source_dir(
     items: list[dict[str, object]] = []
     for path in files:
         relative = _relative_path(source_dir, path)
-        export_path = export_destination(path, output_suffix)
+        export_path = export_destination(path)
         will_skip = skip_if_export_exists and export_path.exists()
         items.append(
             {
@@ -101,9 +114,11 @@ def _relative_path(root: Path, path: Path) -> str:
         return path.name
 
 
-def export_destination(source_path: Path, suffix: str) -> Path:
-    cleaned_suffix = suffix.strip() or config.package_output_suffix()
-    return source_path.with_name(f"{source_path.stem}{cleaned_suffix}{source_path.suffix}")
+def export_destination(source_path: Path, suffix: str = "") -> Path:
+    """Place the translated file in a sibling Translate/ folder with the same name."""
+    _ = suffix  # legacy API argument; no longer used for naming
+    source = source_path.resolve()
+    return source.parent / package_export_dir_name() / source.name
 
 
 def uniquify_destination(path: Path) -> Path:
@@ -124,7 +139,7 @@ def export_package_item(
     *,
     final_video: Path,
     source_path: Path,
-    output_suffix: str,
+    output_suffix: str = "",
     session: Path | None = None,
 ) -> Path:
     _ = session

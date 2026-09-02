@@ -114,7 +114,6 @@ class PackageItemPipelineRunner(PipelineRunner):
         exported_video = export_package_item(
             final_video=final_video,
             source_path=Path(self.item["source_path"]),
-            output_suffix=self.package["output_suffix"],
             session=self.artifacts.session,
         )
         package_db.update_package_item(
@@ -328,10 +327,7 @@ def _run_package_body(package_id: str, package: dict) -> None:
             if current["status"] == "failed" and continue_on_error:
                 continue
             if package.get("skip_if_export_exists"):
-                export_path = export_destination(
-                    Path(current["source_path"]),
-                    package["output_suffix"],
-                )
+                export_path = export_destination(Path(current["source_path"]))
                 if export_path.exists():
                     package_db.update_package_item(
                         current["id"],

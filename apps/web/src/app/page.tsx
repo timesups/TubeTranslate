@@ -240,7 +240,6 @@ export default function Home() {
   const [batchRetrying, setBatchRetrying] = useState(false)
   const [batchRetryError, setBatchRetryError] = useState("")
   const [packageSourceDir, setPackageSourceDir] = useState("")
-  const [packageSuffix, setPackageSuffix] = useState("_译制")
   const [packageRecursive, setPackageRecursive] = useState(false)
   const [packageScanCount, setPackageScanCount] = useState<number | null>(null)
   const [packageScanSkipped, setPackageScanSkipped] = useState(0)
@@ -739,7 +738,6 @@ export default function Home() {
       const result = await scanTaskPackage({
         source_dir: packageSourceDir.trim(),
         recursive: packageRecursive,
-        output_suffix: packageSuffix.trim() || "_译制",
         skip_if_export_exists: true,
       })
       const skipped = result.files.filter((file) => file.will_skip).length
@@ -767,7 +765,6 @@ export default function Home() {
       const created = await createTaskPackage({
         source_dir: packageSourceDir.trim(),
         recursive: packageRecursive,
-        output_suffix: packageSuffix.trim() || "_译制",
         direction: localDirection,
         execution_mode: executionMode,
         audio_mode: audioMode,
@@ -1304,36 +1301,25 @@ export default function Home() {
                   className="font-mono text-xs"
                 />
               </div>
-              <div className="grid gap-3 sm:grid-cols-[1fr_180px]">
-                <div className="space-y-2">
-                  <Label htmlFor="package-suffix">{t.home.packageSuffixLabel}</Label>
-                  <Input
-                    id="package-suffix"
-                    value={packageSuffix}
-                    onChange={(event) => setPackageSuffix(event.target.value)}
-                    className="font-mono text-xs"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="package-direction">{t.home.localDirectionLabel}</Label>
-                  <Select
-                    value={localDirection}
-                    onValueChange={(value) => setLocalDirection(value as LocalDirection)}
-                  >
-                    <SelectTrigger id="package-direction" className="h-10">
-                      <span className="min-w-0 truncate text-left">
-                        {selectedLabel(localDirectionOptions, localDirection)}
-                      </span>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {localDirectionOptions.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+              <div className="space-y-2">
+                <Label htmlFor="package-direction">{t.home.localDirectionLabel}</Label>
+                <Select
+                  value={localDirection}
+                  onValueChange={(value) => setLocalDirection(value as LocalDirection)}
+                >
+                  <SelectTrigger id="package-direction" className="h-10">
+                    <span className="min-w-0 truncate text-left">
+                      {selectedLabel(localDirectionOptions, localDirection)}
+                    </span>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {localDirectionOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
               <label className="flex items-center gap-2 text-sm text-muted-foreground">
                 <input

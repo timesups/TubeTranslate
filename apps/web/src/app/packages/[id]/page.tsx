@@ -186,7 +186,7 @@ export default function PackageDetailPage({ params }: { params: Promise<{ id: st
             </CardHeader>
             <CardContent className="space-y-3">
               <p className="text-xs text-muted-foreground">
-                {t.home.packageSuffixLabel}: <span className="font-mono">{pkg.output_suffix}</span>
+                {t.home.packageSuffixLabel}: <span className="font-mono">{pkg.output_suffix || "Translate"}</span>
               </p>
               {pkg.error_message ? (
                 <p className="rounded-lg border border-red-500/30 bg-red-950/40 px-3 py-2 text-sm text-red-300">
