@@ -575,6 +575,8 @@ describe("任务搜索校验错误", () => {
       bilibili_tid: 229,
       bilibili_auto_publish: true,
       bilibili_generate_meta: true,
+      douyin_auto_publish: false,
+      douyin_generate_meta: true,
     })
   })
 })

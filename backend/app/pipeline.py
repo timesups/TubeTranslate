@@ -51,6 +51,8 @@ class PipelineArtifacts:
     final_video: Path | None = None
     bilibili_meta: Path | None = None
     bilibili_publish: Path | None = None
+    douyin_meta: Path | None = None
+    douyin_publish: Path | None = None
 
 
 def _write_log(task_id: str, message: str) -> None:
@@ -90,6 +92,8 @@ class PipelineRunner:
             "merge_video": self._merge_video,
             "bilibili_meta": self._bilibili_meta,
             "bilibili_publish": self._bilibili_publish,
+            "douyin_meta": self._douyin_meta,
+            "douyin_publish": self._douyin_publish,
         }
 
     def run(self) -> None:
@@ -169,6 +173,13 @@ class PipelineRunner:
         except ValueError:
             return database.DEFAULT_BILIBILI_AUTO_PUBLISH
 
+    def _auto_publish_douyin(self, task: dict | None = None) -> bool:
+        current = task or database.get_task(self.task_id) or {}
+        try:
+            return database.normalize_douyin_auto_publish(current.get("douyin_auto_publish"))
+        except ValueError:
+            return database.DEFAULT_DOUYIN_AUTO_PUBLISH
+
     def _generate_bilibili_meta(self, task: dict | None = None) -> bool:
         current = task or database.get_task(self.task_id) or {}
         try:
@@ -179,13 +190,26 @@ class PipelineRunner:
         except ValueError:
             return database.DEFAULT_BILIBILI_GENERATE_META
 
+    def _generate_douyin_meta(self, task: dict | None = None) -> bool:
+        current = task or database.get_task(self.task_id) or {}
+        try:
+            return database.resolve_douyin_generate_meta(
+                current.get("douyin_generate_meta"),
+                douyin_auto_publish=current.get("douyin_auto_publish"),
+            )
+        except ValueError:
+            return database.DEFAULT_DOUYIN_GENERATE_META
+
     def _export_final_video(self, final_video: Path, *, bilibili_meta: Path | None = None) -> None:
-        """Export only when auto Bilibili publish is disabled."""
+        """Export only when neither Bilibili nor Douyin auto-publish is enabled."""
         from .adapters.export_video import export_final_video
 
         task = database.get_task(self.task_id) or {}
         if self._auto_publish_bilibili(task):
             self.log("Skipped output-dir export because Bilibili auto-publish is enabled")
+            return
+        if self._auto_publish_douyin(task):
+            self.log("Skipped output-dir export because Douyin auto-publish is enabled")
             return
 
         output_dir = database.get_output_settings().get("output_dir", "")
@@ -789,6 +813,127 @@ class PipelineRunner:
             "bilibili_publish",
             f"Published: {bvid}" if bvid else "Published to Bilibili",
         )
+
+    def _douyin_meta(self, task: dict) -> None:
+        import asyncio
+
+        from .bilibili.media_scan import read_srt
+        from .douyin.meta import generate_douyin_meta
+        from .douyin.staging import prepare_douyin_staging
+
+        if not self._generate_douyin_meta(task):
+            self.artifacts.douyin_meta = None
+            self.stage_message(
+                "douyin_meta",
+                "Skipped (Douyin description generation disabled; auto-publish is off)",
+            )
+            return
+
+        session = _require(self.artifacts.session, "session")
+        final_video = self.artifacts.final_video
+        if final_video is None and task.get("final_video_path"):
+            final_video = Path(task["final_video_path"])
+        final_video = _require_existing(_require(final_video, "final_video"), "final_video")
+        self.artifacts.final_video = final_video
+
+        self.stage_progress("douyin_meta", 10, "Preparing Douyin staging package", force=True)
+        package = prepare_douyin_staging(
+            task_id=self.task_id,
+            title=task.get("title"),
+            final_video=final_video,
+            session=session,
+        )
+        subtitle_text = ""
+        if package.subtitle and package.subtitle.exists():
+            subtitle_text = read_srt(package.subtitle)
+
+        self.stage_progress("douyin_meta", 40, "Generating Douyin title and tags", force=True)
+        meta = asyncio.run(
+            generate_douyin_meta(
+                filename=package.video.name,
+                subtitle_text=subtitle_text,
+                source_url=str(task.get("url") or ""),
+                original_title=str(task.get("title") or "").strip() or None,
+            )
+        )
+        payload = {
+            "title": meta["title"],
+            "tags": meta["tag_str"],
+            "video_path": str(package.video),
+            "cover_path": str(package.cover) if package.cover else None,
+            "srt_path": str(package.subtitle) if package.subtitle else None,
+            "stem": package.stem,
+        }
+        out = session / "metadata" / "douyin_meta.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.artifacts.douyin_meta = out
+        self.stage_message("douyin_meta", f"Generated title: {payload['title'][:60]}")
+
+    def _douyin_publish(self, task: dict) -> None:
+        import asyncio
+
+        from .douyin import auth
+        from .douyin.publisher import PublishMeta, create_job, run_publish_job
+
+        if not self._auto_publish_douyin(task):
+            self.stage_message(
+                "douyin_publish",
+                "Skipped upload (task created with Douyin auto-publish disabled)",
+            )
+            return
+
+        session = _require(self.artifacts.session, "session")
+        meta_path = self.artifacts.douyin_meta
+        if meta_path is None:
+            meta_path = session / "metadata" / "douyin_meta.json"
+        meta_path = _require_existing(meta_path, "douyin_meta")
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+
+        video_path = Path(str(payload.get("video_path") or ""))
+        if not video_path.exists():
+            raise RuntimeError(f"Staged Douyin video missing: {video_path}")
+
+        self.stage_progress("douyin_publish", 5, "Checking Douyin login", force=True)
+        status = auth.get_login_status(headed_probe=False)
+        if not status.get("logged_in"):
+            raise RuntimeError("Douyin account is not logged in; open Settings and scan QR first")
+
+        cover_raw = payload.get("cover_path")
+        cover_path = Path(str(cover_raw)) if cover_raw else None
+        publish_meta = PublishMeta(
+            title=str(payload.get("title") or "").strip(),
+            tags=str(payload.get("tags") or ""),
+            video_path=video_path,
+            cover_path=cover_path if cover_path and cover_path.exists() else None,
+        )
+        if not publish_meta.title:
+            raise RuntimeError("Douyin title is empty")
+
+        job = create_job()
+
+        async def _run() -> dict:
+            original_publish = job.publish
+
+            async def publish_and_report() -> None:
+                await original_publish()
+                self.stage_progress(
+                    "douyin_publish",
+                    int(job.progress),
+                    job.message or "Publishing",
+                )
+
+            job.publish = publish_and_report  # type: ignore[method-assign]
+            result = await run_publish_job(publish_meta, job)
+            if job.status != "succeeded":
+                raise RuntimeError(job.error or job.message or "Douyin publish failed")
+            return result
+
+        result = asyncio.run(_run())
+        out = session / "metadata" / "douyin_publish.json"
+        out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.artifacts.douyin_publish = out
+        self.stage_message("douyin_publish", result.get("message") or "Published to Douyin")
 
 
 def run_task(task_id: str) -> None:

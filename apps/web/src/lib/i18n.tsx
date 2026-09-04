@@ -116,6 +116,18 @@ const messages: Record<UiLanguage, Messages> = {
         "Uses the translation LLM to write a Bilibili title and description. Required when auto-publish is enabled.",
       bilibiliGenerateMetaLocked:
         "Auto-publish is on, so title and description generation cannot be turned off.",
+      douyinAutoPublishLabel: "Douyin publish",
+      douyinAutoPublishYes: "Auto publish to Douyin",
+      douyinAutoPublishNo: "Do not publish to Douyin",
+      douyinAutoPublishHelp:
+        "When enabled, Playwright opens Douyin Creator Center and publishes after the video is ready. Independent from Bilibili.",
+      douyinGenerateMetaLabel: "Douyin caption",
+      douyinGenerateMetaYes: "Generate title and tags",
+      douyinGenerateMetaNo: "Skip caption generation",
+      douyinGenerateMetaHelp:
+        "Uses the translation LLM for a short Douyin title and hashtags. Required when Douyin auto-publish is on.",
+      douyinGenerateMetaLocked:
+        "Douyin auto-publish is on, so caption generation cannot be turned off.",
       taskHistory: "Task history",
       jobHistory: "Jobs",
       jobKindFilter: "Type",
@@ -389,6 +401,16 @@ const messages: Record<UiLanguage, Messages> = {
       bilibiliVideoDir: "Staging folder",
       bilibiliSave: "Save Bilibili settings",
       bilibiliSaveSection: "Bilibili settings",
+      douyinSection: "Douyin publish",
+      douyinLoginHelp:
+        "Opens a Chromium window to Douyin Creator Center. Scan the QR code there; login state is saved for later publishes. Page UI changes may require selector updates.",
+      douyinLoggedIn: "Logged in",
+      douyinLoggedOut: "Not logged in",
+      douyinLogin: "Open login browser",
+      douyinWaitingLogin: "Waiting for scan…",
+      douyinLoginHint: "Complete login in the opened browser window",
+      douyinLogout: "Log out of Douyin",
+      douyinDefaultTags: "Default tags",
     },
     auth: {
       title: "Sign in to YouDub",
@@ -425,6 +447,8 @@ const messages: Record<UiLanguage, Messages> = {
       merge_video: "Merge video",
       bilibili_meta: "Bilibili metadata",
       bilibili_publish: "Bilibili publish",
+      douyin_meta: "Douyin metadata",
+      douyin_publish: "Douyin publish",
       done: "Done",
     },
   },
@@ -512,6 +536,17 @@ const messages: Record<UiLanguage, Messages> = {
       bilibiliGenerateMetaHelp:
         "用翻译所用的大模型生成 B 站标题和简介。开启自动投稿时必须生成。",
       bilibiliGenerateMetaLocked: "已开启自动投稿，必须生成标题与简介。",
+      douyinAutoPublishLabel: "抖音投稿",
+      douyinAutoPublishYes: "自动投稿到抖音",
+      douyinAutoPublishNo: "不投稿到抖音",
+      douyinAutoPublishHelp:
+        "开启后，成片就绪时用 Playwright 打开抖音创作者中心自动发布。与 B 站开关互不影响。",
+      douyinGenerateMetaLabel: "抖音文案",
+      douyinGenerateMetaYes: "生成标题与话题",
+      douyinGenerateMetaNo: "不生成文案",
+      douyinGenerateMetaHelp:
+        "用翻译所用的大模型生成抖音标题和话题。开启抖音自动投稿时必须生成。",
+      douyinGenerateMetaLocked: "已开启抖音自动投稿，必须生成文案。",
       taskHistory: "任务历史",
       jobHistory: "任务列表",
       jobKindFilter: "类型",
@@ -782,6 +817,16 @@ const messages: Record<UiLanguage, Messages> = {
       bilibiliVideoDir: "成片暂存目录",
       bilibiliSave: "保存 B 站设置",
       bilibiliSaveSection: "B 站设置",
+      douyinSection: "抖音投稿",
+      douyinLoginHelp:
+        "会弹出 Chromium 打开抖音创作者中心，请在窗口内扫码登录；登录态会保存供后续发布。创作者中心改版时可能需要更新选择器。",
+      douyinLoggedIn: "已登录",
+      douyinLoggedOut: "未登录",
+      douyinLogin: "打开登录浏览器",
+      douyinWaitingLogin: "等待扫码…",
+      douyinLoginHint: "请在弹出的浏览器窗口中完成登录",
+      douyinLogout: "退出抖音登录",
+      douyinDefaultTags: "默认话题",
     },
     auth: {
       title: "登录 YouDub",
@@ -818,6 +863,8 @@ const messages: Record<UiLanguage, Messages> = {
       merge_video: "合成视频",
       bilibili_meta: "生成 B 站简介",
       bilibili_publish: "投稿 B 站",
+      douyin_meta: "生成抖音文案",
+      douyin_publish: "投稿抖音",
       done: "已完成",
     },
   },

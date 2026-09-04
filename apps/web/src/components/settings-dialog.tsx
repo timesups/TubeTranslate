@@ -21,6 +21,7 @@ import {
 } from "@/lib/api"
 import { LANGUAGE_OPTIONS, useI18n } from "@/lib/i18n"
 import { BilibiliSettingsPanel } from "@/components/bilibili-settings-panel"
+import { DouyinSettingsPanel } from "@/components/douyin-settings-panel"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -807,6 +808,7 @@ export function SettingsDialog() {
               </div>
 
               <BilibiliSettingsPanel active={open} />
+              <DouyinSettingsPanel active={open} />
 
               {saveResults.length > 0 ? (
                 <div

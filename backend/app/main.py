@@ -33,6 +33,7 @@ from .stage_reset import remove_stage_artifacts
 from .stages import STAGE_NAMES
 from .youtube import LOCAL_UPLOAD_DIRECTIONS, is_local_upload_url, validate_video_url
 from .bilibili.routes import router as bilibili_router
+from .douyin.routes import router as douyin_router
 
 ALLOWED_VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".flv", ".wmv"}
 ALLOWED_SUBTITLE_SUFFIXES = {".srt"}
@@ -72,6 +73,8 @@ class TaskCreate(BaseModel):
     bilibili_tid: int = 229
     bilibili_auto_publish: bool = True
     bilibili_generate_meta: bool = True
+    douyin_auto_publish: bool = False
+    douyin_generate_meta: bool = True
 
 
 class TaskBatchCreate(BaseModel):
@@ -82,6 +85,8 @@ class TaskBatchCreate(BaseModel):
     bilibili_tid: int = 229
     bilibili_auto_publish: bool = True
     bilibili_generate_meta: bool = True
+    douyin_auto_publish: bool = False
+    douyin_generate_meta: bool = True
 
 
 class TaskPackageScan(BaseModel):
@@ -264,6 +269,7 @@ app = FastAPI(
     openapi_url=None,
 )
 app.include_router(bilibili_router)
+app.include_router(douyin_router)
 
 
 @app.exception_handler(RequestValidationError)
@@ -488,6 +494,27 @@ def normalize_bilibili_generate_meta(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+def normalize_douyin_auto_publish(value: bool | int | str) -> bool:
+    try:
+        return database.normalize_douyin_auto_publish(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def normalize_douyin_generate_meta(
+    value: bool | int | str,
+    *,
+    douyin_auto_publish: bool,
+) -> bool:
+    try:
+        return database.resolve_douyin_generate_meta(
+            value,
+            douyin_auto_publish=douyin_auto_publish,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.post("/api/tasks", status_code=201)
 def create_task(payload: TaskCreate) -> dict:
     try:
@@ -501,6 +528,7 @@ def create_task(payload: TaskCreate) -> dict:
 
     _ensure_runtime_ready()
     auto_publish = normalize_bilibili_auto_publish(payload.bilibili_auto_publish)
+    douyin_auto = normalize_douyin_auto_publish(payload.douyin_auto_publish)
     task_id = database.create_task(
         validated_url.url,
         task_id=validated_url.video_id,
@@ -512,6 +540,11 @@ def create_task(payload: TaskCreate) -> dict:
         bilibili_generate_meta=normalize_bilibili_generate_meta(
             payload.bilibili_generate_meta,
             bilibili_auto_publish=auto_publish,
+        ),
+        douyin_auto_publish=douyin_auto,
+        douyin_generate_meta=normalize_douyin_generate_meta(
+            payload.douyin_generate_meta,
+            douyin_auto_publish=douyin_auto,
         ),
     )
     worker.enqueue(task_id)
@@ -549,6 +582,11 @@ def create_tasks_batch(payload: TaskBatchCreate) -> dict:
     bilibili_generate_meta = normalize_bilibili_generate_meta(
         payload.bilibili_generate_meta,
         bilibili_auto_publish=bilibili_auto_publish,
+    )
+    douyin_auto_publish = normalize_douyin_auto_publish(payload.douyin_auto_publish)
+    douyin_generate_meta = normalize_douyin_generate_meta(
+        payload.douyin_generate_meta,
+        douyin_auto_publish=douyin_auto_publish,
     )
 
     created: list[dict] = []
@@ -597,6 +635,8 @@ def create_tasks_batch(payload: TaskBatchCreate) -> dict:
                 bilibili_tid=bilibili_tid,
                 bilibili_auto_publish=bilibili_auto_publish,
                 bilibili_generate_meta=bilibili_generate_meta,
+                douyin_auto_publish=douyin_auto_publish,
+                douyin_generate_meta=douyin_generate_meta,
             )
             worker.enqueue(task_id)
             task = database.get_task(task_id)
@@ -997,6 +1037,8 @@ def upload_local_video(
     bilibili_tid: int = Form(229),
     bilibili_auto_publish: str = Form("true"),
     bilibili_generate_meta: str = Form("true"),
+    douyin_auto_publish: str = Form("false"),
+    douyin_generate_meta: str = Form("true"),
 ) -> dict:
     if direction not in LOCAL_UPLOAD_DIRECTIONS:
         raise HTTPException(status_code=422, detail="Unsupported local video direction.")
@@ -1014,6 +1056,11 @@ def upload_local_video(
     normalized_generate_meta = normalize_bilibili_generate_meta(
         bilibili_generate_meta,
         bilibili_auto_publish=normalized_auto_publish,
+    )
+    normalized_douyin_auto = normalize_douyin_auto_publish(douyin_auto_publish)
+    normalized_douyin_meta = normalize_douyin_generate_meta(
+        douyin_generate_meta,
+        douyin_auto_publish=normalized_douyin_auto,
     )
     _ensure_runtime_ready()
 
@@ -1045,6 +1092,8 @@ def upload_local_video(
             bilibili_tid=normalized_bilibili_tid,
             bilibili_auto_publish=normalized_auto_publish,
             bilibili_generate_meta=normalized_generate_meta,
+            douyin_auto_publish=normalized_douyin_auto,
+            douyin_generate_meta=normalized_douyin_meta,
         )
         database.update_task(task_id, title=Path(original_name).stem)
         task = database.get_task(task_id)
@@ -1409,6 +1458,13 @@ def rerun_task(task_id: str) -> dict:
         task.get("bilibili_generate_meta"),
         bilibili_auto_publish=bilibili_auto_publish,
     )
+    douyin_auto_publish = database.normalize_douyin_auto_publish(
+        task.get("douyin_auto_publish")
+    )
+    douyin_generate_meta = database.resolve_douyin_generate_meta(
+        task.get("douyin_generate_meta"),
+        douyin_auto_publish=douyin_auto_publish,
+    )
     _purge_task(task)
     new_id = database.create_task(
         url,
@@ -1419,6 +1475,8 @@ def rerun_task(task_id: str) -> dict:
         bilibili_tid=bilibili_tid,
         bilibili_auto_publish=bilibili_auto_publish,
         bilibili_generate_meta=bilibili_generate_meta,
+        douyin_auto_publish=douyin_auto_publish,
+        douyin_generate_meta=douyin_generate_meta,
     )
     worker.enqueue(new_id)
     return database.get_task(new_id)

@@ -19,6 +19,8 @@ STAGE_OWN_ARTIFACTS: dict[str, tuple[str, ...]] = {
     "merge_video": ("tmp/audio_mixed.m4a", "media/video_final.mp4"),
     "bilibili_meta": ("metadata/bilibili_meta.json",),
     "bilibili_publish": ("metadata/bilibili_publish.json",),
+    "douyin_meta": ("metadata/douyin_meta.json",),
+    "douyin_publish": ("metadata/douyin_publish.json",),
 }
 
 

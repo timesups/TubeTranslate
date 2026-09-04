@@ -120,6 +120,8 @@ export type Task = {
   bilibili_tid?: number
   bilibili_auto_publish?: boolean
   bilibili_generate_meta?: boolean
+  douyin_auto_publish?: boolean
+  douyin_generate_meta?: boolean
   pause_requested?: boolean
   stages: TaskStage[]
 }
@@ -233,6 +235,8 @@ export type TaskSummary = {
   bilibili_tid?: number
   bilibili_auto_publish?: boolean
   bilibili_generate_meta?: boolean
+  douyin_auto_publish?: boolean
+  douyin_generate_meta?: boolean
 }
 
 export type TaskListStatus = "all" | TaskStatus
@@ -591,6 +595,8 @@ export function createTask(
   bilibiliTid: number = 229,
   bilibiliAutoPublish: boolean = true,
   bilibiliGenerateMeta: boolean = true,
+  douyinAutoPublish: boolean = false,
+  douyinGenerateMeta: boolean = true,
 ) {
   return request<Task>("/api/tasks", {
     method: "POST",
@@ -602,6 +608,8 @@ export function createTask(
       bilibili_tid: bilibiliTid,
       bilibili_auto_publish: bilibiliAutoPublish,
       bilibili_generate_meta: bilibiliGenerateMeta,
+      douyin_auto_publish: douyinAutoPublish,
+      douyin_generate_meta: douyinGenerateMeta,
     }),
   })
 }
@@ -614,6 +622,8 @@ export function createTasksBatch(
   bilibiliTid: number = 229,
   bilibiliAutoPublish: boolean = true,
   bilibiliGenerateMeta: boolean = true,
+  douyinAutoPublish: boolean = false,
+  douyinGenerateMeta: boolean = true,
 ) {
   return request<TaskBatchResult>("/api/tasks/batch", {
     method: "POST",
@@ -625,6 +635,8 @@ export function createTasksBatch(
       bilibili_tid: bilibiliTid,
       bilibili_auto_publish: bilibiliAutoPublish,
       bilibili_generate_meta: bilibiliGenerateMeta,
+      douyin_auto_publish: douyinAutoPublish,
+      douyin_generate_meta: douyinGenerateMeta,
     }),
   })
 }
@@ -639,6 +651,8 @@ export async function uploadLocalTask(
   bilibiliTid: number = 229,
   bilibiliAutoPublish: boolean = true,
   bilibiliGenerateMeta: boolean = true,
+  douyinAutoPublish: boolean = false,
+  douyinGenerateMeta: boolean = true,
 ) {
   const form = new FormData()
   form.append("direction", direction)
@@ -652,6 +666,8 @@ export async function uploadLocalTask(
   form.append("bilibili_tid", String(bilibiliTid))
   form.append("bilibili_auto_publish", bilibiliAutoPublish ? "true" : "false")
   form.append("bilibili_generate_meta", bilibiliGenerateMeta ? "true" : "false")
+  form.append("douyin_auto_publish", douyinAutoPublish ? "true" : "false")
+  form.append("douyin_generate_meta", douyinGenerateMeta ? "true" : "false")
 
   const options: RequestInit = {
     method: "POST",
@@ -686,6 +702,8 @@ export async function uploadLocalTasks(
   bilibiliTid: number = 229,
   bilibiliAutoPublish: boolean = true,
   bilibiliGenerateMeta: boolean = true,
+  douyinAutoPublish: boolean = false,
+  douyinGenerateMeta: boolean = true,
 ): Promise<LocalUploadBatchResult> {
   const created: Task[] = []
   const errors: LocalUploadBatchError[] = []
@@ -703,6 +721,8 @@ export async function uploadLocalTasks(
         bilibiliTid,
         bilibiliAutoPublish,
         bilibiliGenerateMeta,
+        douyinAutoPublish,
+        douyinGenerateMeta,
       )
       created.push(task)
     } catch (err) {
@@ -999,4 +1019,94 @@ export function publishBilibili(items: {
 
 export function getBilibiliJob(jobId: string) {
   return request<BilibiliJob>(`/api/bilibili/jobs/${jobId}`)
+}
+
+export type DouyinAuthStatus = {
+  logged_in: boolean
+  uname?: string
+  has_storage_state?: boolean
+  login_session?: {
+    active: boolean
+    message: string
+    logged_in: boolean
+    error?: string | null
+    has_storage_state?: boolean
+  }
+}
+
+export type DouyinSettings = {
+  default_tags: string
+  headless_publish: boolean
+  publish_timeout_sec: number
+}
+
+export type DouyinJob = {
+  id: string
+  status: string
+  progress: number
+  message: string
+  result?: Record<string, unknown> | null
+  error?: string | null
+}
+
+export function getDouyinAuthStatus() {
+  return request<DouyinAuthStatus>("/api/douyin/auth/status")
+}
+
+export function startDouyinLogin(timeoutSec = 300) {
+  return request<DouyinAuthStatus["login_session"]>("/api/douyin/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ timeout_sec: timeoutSec }),
+  })
+}
+
+export function getDouyinLoginStatus() {
+  return request<NonNullable<DouyinAuthStatus["login_session"]>>("/api/douyin/auth/login/status")
+}
+
+export function logoutDouyin() {
+  return request<{ ok: boolean; logged_in: boolean }>("/api/douyin/auth/logout", {
+    method: "DELETE",
+  })
+}
+
+export function getDouyinSettings() {
+  return request<DouyinSettings>("/api/douyin/settings")
+}
+
+export function saveDouyinSettings(payload: Partial<DouyinSettings>) {
+  return request<DouyinSettings>("/api/douyin/settings", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  })
+}
+
+export function generateDouyinMeta(taskId: string) {
+  return request<{
+    task_id: string
+    title: string
+    tags: string
+    video_path: string
+    cover_path: string | null
+  }>("/api/douyin/generate", {
+    method: "POST",
+    body: JSON.stringify({ task_id: taskId }),
+  })
+}
+
+export function publishDouyin(items: {
+  task_id?: string
+  title: string
+  tags?: string
+  video_path: string
+  cover_path?: string | null
+}[]) {
+  return request<{ jobs: DouyinJob[] }>("/api/douyin/publish", {
+    method: "POST",
+    body: JSON.stringify({ items }),
+  })
+}
+
+export function getDouyinJob(jobId: string) {
+  return request<DouyinJob>(`/api/douyin/jobs/${jobId}`)
 }

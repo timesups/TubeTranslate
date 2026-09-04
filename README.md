@@ -143,11 +143,13 @@ OPENAI_MODEL=deepseek-v4-flash
 | `MERGE_VIDEO_ENCODER` | 合成视频编码：`auto`（默认）、`copy`、`x264`、`nvenc`、`qsv`、`amf`；`auto` 时竖屏优先 copy，横屏烧字幕优先 GPU |
 | `MERGE_VIDEO_CRF` / `MERGE_VIDEO_NVENC_PRESET` | 合成质量与 NVENC preset（默认 CRF/CQ 23、p4） |
 | `PACKAGE_ALLOWED_ROOTS` | 目录批处理允许扫描的根目录（分号分隔）；留空则不限制 |
-| `PACKAGE_OUTPUT_SUFFIX` | 批处理导出后缀（默认 `_译制`） |
+| `PACKAGE_EXPORT_DIR_NAME` | 批处理导出子目录名（默认 `Translate`；成片写入源视频同级的该目录） |
 | `HTTP_PROXY` / `NO_PROXY` | yt-dlp / HTTPX 代理 |
 | `AZURE_TTS_*` | Azure 云端 TTS（也可在 Web 设置里配置；`AZURE_TTS_SUBSCRIPTION_KEY` 支持多个 key，用逗号/换行分隔） |
 
-翻译与 B 站简介生成都走 Web **设置 → OpenAI**（或上述环境变量默认值），无需再单独配置 DeepSeek Key。
+翻译与 B 站/抖音简介生成都走 Web **设置 → OpenAI**（或上述环境变量默认值）。
+
+**抖音投稿（创作者中心自动化）**：安装依赖后需执行 `playwright install chromium`。在设置中点击「打开登录浏览器」扫码登录；创建任务时可勾选「自动投稿到抖音」。发布依赖页面选择器，创作者中心改版后可能需要调整代码；存在账号风控风险，请自行评估。
 
 ### 4. 启动
 

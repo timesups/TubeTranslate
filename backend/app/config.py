@@ -126,7 +126,9 @@ def merge_video_nvenc_preset() -> str:
 
 def package_export_dir_name() -> str:
     raw = (os.getenv("PACKAGE_EXPORT_DIR_NAME") or "Translate").strip()
-    return raw or "Translate"
+    if not raw or any(ch in raw for ch in ('/', '\\', ':', '*', '?', '"', '<', '>', '|')):
+        return "Translate"
+    return raw
 
 
 def package_output_suffix() -> str:

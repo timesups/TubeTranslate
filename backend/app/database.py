@@ -33,6 +33,8 @@ DEFAULT_TTS_PROVIDER = "azure"
 DEFAULT_BILIBILI_TID = 229  # 知识区 · 设计·创意
 DEFAULT_BILIBILI_AUTO_PUBLISH = True
 DEFAULT_BILIBILI_GENERATE_META = True
+DEFAULT_DOUYIN_AUTO_PUBLISH = False
+DEFAULT_DOUYIN_GENERATE_META = True
 
 
 def now_iso() -> str:
@@ -76,7 +78,9 @@ def init_db() -> None:
               tts_provider TEXT NOT NULL DEFAULT 'azure',
               bilibili_tid INTEGER NOT NULL DEFAULT 229,
               bilibili_auto_publish INTEGER NOT NULL DEFAULT 1,
-              bilibili_generate_meta INTEGER NOT NULL DEFAULT 1
+              bilibili_generate_meta INTEGER NOT NULL DEFAULT 1,
+              douyin_auto_publish INTEGER NOT NULL DEFAULT 0,
+              douyin_generate_meta INTEGER NOT NULL DEFAULT 1
             );
 
             CREATE TABLE IF NOT EXISTS task_stages (
@@ -166,6 +170,14 @@ def init_db() -> None:
         if "bilibili_generate_meta" not in task_columns:
             conn.execute(
                 "ALTER TABLE tasks ADD COLUMN bilibili_generate_meta INTEGER NOT NULL DEFAULT 1"
+            )
+        if "douyin_auto_publish" not in task_columns:
+            conn.execute(
+                "ALTER TABLE tasks ADD COLUMN douyin_auto_publish INTEGER NOT NULL DEFAULT 0"
+            )
+        if "douyin_generate_meta" not in task_columns:
+            conn.execute(
+                "ALTER TABLE tasks ADD COLUMN douyin_generate_meta INTEGER NOT NULL DEFAULT 1"
             )
         if "pause_requested" not in task_columns:
             conn.execute(
@@ -441,11 +453,59 @@ def resolve_bilibili_generate_meta(
     return normalize_bilibili_generate_meta(generate_meta)
 
 
+def normalize_douyin_auto_publish(value: bool | int | str | None) -> bool:
+    if value is None:
+        return DEFAULT_DOUYIN_AUTO_PUBLISH
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        raise ValueError("douyin_auto_publish must be 0 or 1")
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError("douyin_auto_publish must be a boolean")
+
+
+def normalize_douyin_generate_meta(value: bool | int | str | None) -> bool:
+    if value is None:
+        return DEFAULT_DOUYIN_GENERATE_META
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        raise ValueError("douyin_generate_meta must be 0 or 1")
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "generate"}:
+        return True
+    if text in {"0", "false", "no", "off", "skip"}:
+        return False
+    raise ValueError("douyin_generate_meta must be a boolean")
+
+
+def resolve_douyin_generate_meta(
+    generate_meta: bool | int | str | None,
+    *,
+    douyin_auto_publish: bool | int | str | None,
+) -> bool:
+    if normalize_douyin_auto_publish(douyin_auto_publish):
+        return True
+    return normalize_douyin_generate_meta(generate_meta)
+
+
 def _serialize_task_fields(data: dict[str, Any]) -> dict[str, Any]:
     if "bilibili_auto_publish" in data:
         data["bilibili_auto_publish"] = bool(data["bilibili_auto_publish"])
     if "bilibili_generate_meta" in data:
         data["bilibili_generate_meta"] = bool(data["bilibili_generate_meta"])
+    if "douyin_auto_publish" in data:
+        data["douyin_auto_publish"] = bool(data["douyin_auto_publish"])
+    if "douyin_generate_meta" in data:
+        data["douyin_generate_meta"] = bool(data["douyin_generate_meta"])
     if "pause_requested" in data:
         data["pause_requested"] = bool(data["pause_requested"])
     return data
@@ -461,6 +521,8 @@ def create_task(
     bilibili_tid: int = DEFAULT_BILIBILI_TID,
     bilibili_auto_publish: bool = DEFAULT_BILIBILI_AUTO_PUBLISH,
     bilibili_generate_meta: bool = DEFAULT_BILIBILI_GENERATE_META,
+    douyin_auto_publish: bool = DEFAULT_DOUYIN_AUTO_PUBLISH,
+    douyin_generate_meta: bool = DEFAULT_DOUYIN_GENERATE_META,
 ) -> str:
     new_id = task_id or str(uuid.uuid4())
     created_at = now_iso()
@@ -477,15 +539,25 @@ def create_task(
         )
         else 0
     )
+    resolved_douyin_auto = 1 if normalize_douyin_auto_publish(douyin_auto_publish) else 0
+    resolved_douyin_meta = (
+        1
+        if resolve_douyin_generate_meta(
+            douyin_generate_meta,
+            douyin_auto_publish=resolved_douyin_auto,
+        )
+        else 0
+    )
     with connect() as conn:
         conn.execute(
             """
             INSERT INTO tasks (
               id, url, status, current_stage, created_at,
               execution_mode, audio_mode, tts_provider, bilibili_tid,
-              bilibili_auto_publish, bilibili_generate_meta
+              bilibili_auto_publish, bilibili_generate_meta,
+              douyin_auto_publish, douyin_generate_meta
             )
-            VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 new_id,
@@ -498,6 +570,8 @@ def create_task(
                 resolved_tid,
                 resolved_auto_publish,
                 resolved_generate_meta,
+                resolved_douyin_auto,
+                resolved_douyin_meta,
             ),
         )
         conn.executemany(
@@ -538,7 +612,8 @@ def latest_task_id() -> str | None:
 TASK_SUMMARY_COLUMNS = (
     "id, url, title, status, current_stage, final_video_path, error_message, "
     "created_at, started_at, completed_at, execution_mode, audio_mode, tts_provider, "
-    "bilibili_tid, bilibili_auto_publish, bilibili_generate_meta"
+    "bilibili_tid, bilibili_auto_publish, bilibili_generate_meta, "
+    "douyin_auto_publish, douyin_generate_meta"
 )
 
 TASK_LIST_SORTS = {

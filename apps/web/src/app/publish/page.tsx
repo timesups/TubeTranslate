@@ -8,12 +8,17 @@ import {
   BilibiliJob,
   BilibiliPartition,
   BilibiliReadyItem,
+  DouyinJob,
   generateBilibiliMeta,
+  generateDouyinMeta,
   getBilibiliAuthStatus,
   getBilibiliJob,
   getBilibiliPartitions,
+  getDouyinAuthStatus,
+  getDouyinJob,
   listBilibiliReady,
   publishBilibili,
+  publishDouyin,
 } from "@/lib/api"
 import { useI18n } from "@/lib/i18n"
 import { AppShell } from "@/components/app-shell"
@@ -48,6 +53,7 @@ function formatSize(bytes: number) {
 
 export default function PublishPage() {
   const { t } = useI18n()
+  const [platform, setPlatform] = useState<"bilibili" | "douyin">("bilibili")
   const [items, setItems] = useState<BilibiliReadyItem[]>([])
   const [videoDir, setVideoDir] = useState("")
   const [partitions, setPartitions] = useState<BilibiliPartition[]>([])
@@ -60,6 +66,13 @@ export default function PublishPage() {
   const [busyId, setBusyId] = useState("")
   const [error, setError] = useState("")
   const [message, setMessage] = useState("")
+  const [douyinLoggedIn, setDouyinLoggedIn] = useState(false)
+  const [douyinTaskId, setDouyinTaskId] = useState("")
+  const [douyinTitle, setDouyinTitle] = useState("")
+  const [douyinTags, setDouyinTags] = useState("")
+  const [douyinVideoPath, setDouyinVideoPath] = useState("")
+  const [douyinCoverPath, setDouyinCoverPath] = useState("")
+  const [douyinJobs, setDouyinJobs] = useState<DouyinJob[]>([])
 
   const readyItems = useMemo(() => items.filter((item) => item.ready), [items])
 
@@ -67,16 +80,18 @@ export default function PublishPage() {
     setLoading(true)
     setError("")
     try {
-      const [auth, ready, parts] = await Promise.all([
+      const [auth, ready, parts, douyinAuth] = await Promise.all([
         getBilibiliAuthStatus(),
         listBilibiliReady(),
         getBilibiliPartitions(),
+        getDouyinAuthStatus(),
       ])
       setLoggedIn(Boolean(auth.logged_in))
       setUname(auth.uname || "")
       setItems(ready.items)
       setVideoDir(ready.video_dir)
       setPartitions(parts)
+      setDouyinLoggedIn(Boolean(douyinAuth.logged_in))
     } catch (err) {
       setError(err instanceof Error ? err.message : t.publish.empty)
     } finally {
@@ -103,6 +118,63 @@ export default function PublishPage() {
     }, 1500)
     return () => window.clearInterval(timer)
   }, [jobs])
+
+  useEffect(() => {
+    const active = douyinJobs.filter(
+      (job) => job.status === "queued" || job.status === "running" || job.status === "uploading",
+    )
+    if (!active.length) return
+    const timer = window.setInterval(() => {
+      void Promise.all(
+        active.map(async (job) => {
+          const next = await getDouyinJob(job.id)
+          setDouyinJobs((current) => current.map((entry) => (entry.id === job.id ? next : entry)))
+        }),
+      )
+    }, 2000)
+    return () => window.clearInterval(timer)
+  }, [douyinJobs])
+
+  async function handleDouyinGenerate() {
+    if (!douyinTaskId.trim()) return
+    setBusyId("douyin-generate")
+    setError("")
+    try {
+      const draft = await generateDouyinMeta(douyinTaskId.trim())
+      setDouyinTitle(draft.title)
+      setDouyinTags(draft.tags)
+      setDouyinVideoPath(draft.video_path)
+      setDouyinCoverPath(draft.cover_path || "")
+      setMessage(draft.title)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.publish.jobError)
+    } finally {
+      setBusyId("")
+    }
+  }
+
+  async function handleDouyinPublish() {
+    if (!douyinVideoPath || !douyinTitle.trim()) return
+    setBusyId("douyin-publish")
+    setError("")
+    try {
+      const result = await publishDouyin([
+        {
+          task_id: douyinTaskId.trim() || undefined,
+          title: douyinTitle.trim(),
+          tags: douyinTags,
+          video_path: douyinVideoPath,
+          cover_path: douyinCoverPath || null,
+        },
+      ])
+      setDouyinJobs(result.jobs)
+      setMessage(t.publish.publishSelected)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.publish.jobError)
+    } finally {
+      setBusyId("")
+    }
+  }
 
   function toggleSelected(id: string, checked: boolean) {
     setSelected((current) => {
@@ -188,6 +260,118 @@ export default function PublishPage() {
   return (
     <AppShell>
       <div className="flex flex-col gap-4">
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            variant={platform === "bilibili" ? "default" : "outline"}
+            onClick={() => setPlatform("bilibili")}
+          >
+            Bilibili
+          </Button>
+          <Button
+            type="button"
+            variant={platform === "douyin" ? "default" : "outline"}
+            onClick={() => setPlatform("douyin")}
+          >
+            抖音
+          </Button>
+        </div>
+
+        {platform === "douyin" ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>抖音投稿台</CardTitle>
+              <p className="mt-1 text-sm text-muted-foreground">
+                填写已完成任务的 ID，生成文案后发布到创作者中心。请先在设置中完成抖音登录。
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <Badge variant={douyinLoggedIn ? "default" : "outline"}>
+                {douyinLoggedIn ? "抖音已登录" : "抖音未登录"}
+              </Badge>
+              <div className="space-y-2">
+                <Label htmlFor="douyin-task-id">任务 ID</Label>
+                <Input
+                  id="douyin-task-id"
+                  value={douyinTaskId}
+                  onChange={(event) => setDouyinTaskId(event.target.value)}
+                  placeholder="task uuid"
+                  className="font-mono text-xs"
+                />
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void refresh()}
+                  disabled={loading}
+                >
+                  {loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+                  {t.publish.refresh}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void handleDouyinGenerate()}
+                  disabled={!douyinTaskId.trim() || Boolean(busyId)}
+                >
+                  {busyId === "douyin-generate" ? <Loader2 className="size-4 animate-spin" /> : null}
+                  生成抖音文案
+                </Button>
+                <Button
+                  type="button"
+                  onClick={() => void handleDouyinPublish()}
+                  disabled={!douyinVideoPath || !douyinTitle.trim() || Boolean(busyId) || !douyinLoggedIn}
+                >
+                  {busyId === "douyin-publish" ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Upload className="size-4" />
+                  )}
+                  发布到抖音
+                </Button>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="douyin-title">标题</Label>
+                <Input
+                  id="douyin-title"
+                  value={douyinTitle}
+                  onChange={(event) => setDouyinTitle(event.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="douyin-tags">话题</Label>
+                <Input
+                  id="douyin-tags"
+                  value={douyinTags}
+                  onChange={(event) => setDouyinTags(event.target.value)}
+                  placeholder="配音,翻译"
+                />
+              </div>
+              {douyinVideoPath ? (
+                <p className="truncate text-xs text-muted-foreground">{douyinVideoPath}</p>
+              ) : null}
+              {douyinJobs.map((job) => (
+                <div key={job.id} className="rounded-lg border border-border/60 p-3 text-sm">
+                  <p className="font-medium">{job.status} · {job.progress}%</p>
+                  <p className="text-muted-foreground">{job.message}</p>
+                  {job.error ? <p className="text-red-400">{job.error}</p> : null}
+                </div>
+              ))}
+              {message ? (
+                <div className="rounded-lg border border-emerald-500/30 bg-emerald-950/40 px-3 py-2 text-sm text-emerald-300">
+                  {message}
+                </div>
+              ) : null}
+              {error ? (
+                <div className="rounded-lg border border-red-500/30 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+                  {error}
+                </div>
+              ) : null}
+            </CardContent>
+          </Card>
+        ) : (
+        <>
         <Card>
           <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
@@ -402,6 +586,8 @@ export default function PublishPage() {
             </CardContent>
           </Card>
         ) : null}
+        </>
+        )}
       </div>
     </AppShell>
   )

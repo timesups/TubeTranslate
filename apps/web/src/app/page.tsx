@@ -214,6 +214,8 @@ export default function Home() {
   const [bilibiliTid, setBilibiliTid] = useState(DEFAULT_BILIBILI_TID)
   const [bilibiliAutoPublish, setBilibiliAutoPublish] = useState(true)
   const [bilibiliGenerateMeta, setBilibiliGenerateMeta] = useState(true)
+  const [douyinAutoPublish, setDouyinAutoPublish] = useState(false)
+  const [douyinGenerateMeta, setDouyinGenerateMeta] = useState(true)
   const [tasks, setTasks] = useState<TaskSummary[]>([])
   const [taskTotal, setTaskTotal] = useState(0)
   const [activeTaskCount, setActiveTaskCount] = useState<number | null>(null)
@@ -364,7 +366,16 @@ export default function Home() {
     { value: "true", label: t.home.bilibiliGenerateMetaYes },
     { value: "false", label: t.home.bilibiliGenerateMetaNo },
   ]
+  const douyinAutoPublishOptions: { value: "true" | "false"; label: string }[] = [
+    { value: "true", label: t.home.douyinAutoPublishYes },
+    { value: "false", label: t.home.douyinAutoPublishNo },
+  ]
+  const douyinGenerateMetaOptions: { value: "true" | "false"; label: string }[] = [
+    { value: "true", label: t.home.douyinGenerateMetaYes },
+    { value: "false", label: t.home.douyinGenerateMetaNo },
+  ]
   const effectiveGenerateMeta = bilibiliAutoPublish ? true : bilibiliGenerateMeta
+  const effectiveDouyinGenerateMeta = douyinAutoPublish ? true : douyinGenerateMeta
 
   const statusOptions: { value: TaskListStatus; label: string }[] = [
     { value: "all", label: t.home.allStatuses },
@@ -895,6 +906,8 @@ export default function Home() {
           bilibiliTid,
           bilibiliAutoPublish,
           effectiveGenerateMeta,
+          douyinAutoPublish,
+          effectiveDouyinGenerateMeta,
         )
         const createdCount = result.created.length
         const failedCount = result.errors.length
@@ -937,6 +950,8 @@ export default function Home() {
         bilibiliTid,
         bilibiliAutoPublish,
         effectiveGenerateMeta,
+        douyinAutoPublish,
+        effectiveDouyinGenerateMeta,
       )
       const createdCount = result.created.length
       const existingCount = result.existing.length
@@ -1248,6 +1263,66 @@ export default function Home() {
                     : t.home.bilibiliGenerateMetaHelp}
                 </p>
               </div>
+              <div className="space-y-2">
+                <Label htmlFor="douyin-auto-publish">{t.home.douyinAutoPublishLabel}</Label>
+                <Select
+                  value={douyinAutoPublish ? "true" : "false"}
+                  onValueChange={(value) => {
+                    const enabled = value === "true"
+                    setDouyinAutoPublish(enabled)
+                    if (enabled) setDouyinGenerateMeta(true)
+                  }}
+                >
+                  <SelectTrigger id="douyin-auto-publish" className="h-10">
+                    <span className="min-w-0 truncate text-left">
+                      {selectedLabel(
+                        douyinAutoPublishOptions,
+                        douyinAutoPublish ? "true" : "false",
+                      )}
+                    </span>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {douyinAutoPublishOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">{t.home.douyinAutoPublishHelp}</p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="douyin-generate-meta">{t.home.douyinGenerateMetaLabel}</Label>
+                <Select
+                  value={effectiveDouyinGenerateMeta ? "true" : "false"}
+                  onValueChange={(value) => {
+                    if (douyinAutoPublish) return
+                    setDouyinGenerateMeta(value === "true")
+                  }}
+                  disabled={douyinAutoPublish}
+                >
+                  <SelectTrigger id="douyin-generate-meta" className="h-10">
+                    <span className="min-w-0 truncate text-left">
+                      {selectedLabel(
+                        douyinGenerateMetaOptions,
+                        effectiveDouyinGenerateMeta ? "true" : "false",
+                      )}
+                    </span>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {douyinGenerateMetaOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {douyinAutoPublish
+                    ? t.home.douyinGenerateMetaLocked
+                    : t.home.douyinGenerateMetaHelp}
+                </p>
+              </div>
               <div className="flex items-center justify-between gap-3">
                 {activeTaskCount !== null && activeTaskCount > 0 ? (
                   <p className="text-xs text-muted-foreground">
@@ -1287,6 +1362,7 @@ export default function Home() {
           <CardContent>
             <form onSubmit={submitPackage} className="space-y-4">
               <p className="text-xs text-muted-foreground">{t.home.packageSourceDirHelp}</p>
+              <p className="text-xs text-muted-foreground">{t.home.packageExportDirHelp}</p>
               <div className="space-y-2">
                 <Label htmlFor="package-source-dir">{t.home.packageSourceDirLabel}</Label>
                 <Input

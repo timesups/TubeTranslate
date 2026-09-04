@@ -149,12 +149,14 @@ def test_scan_task_package_api(monkeypatch, tmp_path):
 
     response = client.post(
         "/api/task-packages/scan",
-        json={"source_dir": str(source_dir), "output_suffix": "_译制"},
+        json={"source_dir": str(source_dir)},
     )
     assert response.status_code == 200
     body = response.json()
     assert body["count"] == 1
+    assert body["output_suffix"] == "Translate"
     assert body["files"][0]["title"] == "clip"
+    assert Path(body["files"][0]["export_path"]) == source_dir / "Translate" / "clip.mp4"
 
 
 def test_create_task_package_api_enqueues(monkeypatch, tmp_path):
@@ -172,12 +174,12 @@ def test_create_task_package_api_enqueues(monkeypatch, tmp_path):
             "source_dir": str(source_dir),
             "name": "My Batch",
             "direction": "en-zh",
-            "output_suffix": "_译制",
         },
     )
     assert response.status_code == 201
     body = response.json()
     assert body["name"] == "My Batch"
+    assert body["output_suffix"] == "Translate"
     assert len(body["items"]) == 1
     assert enqueued == [body["id"]]
 

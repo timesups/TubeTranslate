@@ -476,5 +476,7 @@ def synthesize_task_dict(item: dict[str, Any], package: dict[str, Any]) -> dict[
         "tts_provider": package.get("tts_provider"),
         "bilibili_auto_publish": False,
         "bilibili_generate_meta": False,
+        "douyin_auto_publish": False,
+        "douyin_generate_meta": False,
         "stages": item.get("stages") or [],
     }
