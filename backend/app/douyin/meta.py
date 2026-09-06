@@ -37,7 +37,7 @@ def _parse_json_object(raw: str) -> dict[str, Any]:
 
 
 def _fallback_meta(*, filename: str, original_title: str | None, default_tags: str) -> dict[str, Any]:
-    title = (original_title or "").strip()[:55] or Path(filename).stem[:55] or "配音视频"
+    title = (original_title or "").strip()[:30] or Path(filename).stem[:30] or "配音视频"
     tags = [part.strip() for part in default_tags.replace("，", ",").split(",") if part.strip()][:5]
     return {"title": title, "tags": tags, "tag_str": ",".join(tags)}
 
@@ -70,7 +70,7 @@ def _generate_sync(
 
     system = (
         "你是抖音短视频运营助手。只输出一个 JSON 对象，不要 markdown。"
-        '字段：title(string, <=55字), tags(string[], 3-5个话题词, 不要#)。'
+        '字段：title(string, <=30字), tags(string[], 3-5个话题词, 不要#)。'
     )
     user = (
         f"原标题：{original_title or ''}\n"
@@ -89,7 +89,7 @@ def _generate_sync(
         )
         raw = _message_text(response)
         data = _parse_json_object(raw)
-        title = str(data.get("title") or "").strip()[:55]
+        title = str(data.get("title") or "").strip()[:30]
         tags_raw = data.get("tags") or []
         if isinstance(tags_raw, str):
             tags = [part.strip().lstrip("#") for part in tags_raw.replace("，", ",").split(",") if part.strip()]

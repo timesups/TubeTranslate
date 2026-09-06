@@ -413,6 +413,28 @@ class PipelineRunner:
             publish_path = session / "metadata" / "bilibili_publish.json"
             self.artifacts.bilibili_publish = publish_path if publish_path.exists() else None
             return
+        if stage == "douyin_meta":
+            self.artifacts.final_video = _require_existing(session / "media" / "video_final.mp4", "final_video")
+            meta_path = session / "metadata" / "douyin_meta.json"
+            if meta_path.exists():
+                self.artifacts.douyin_meta = meta_path
+            elif self._generate_douyin_meta(task):
+                self.artifacts.douyin_meta = _require_existing(meta_path, "douyin_meta")
+            else:
+                self.artifacts.douyin_meta = None
+            return
+        if stage == "douyin_publish":
+            self.artifacts.final_video = _require_existing(session / "media" / "video_final.mp4", "final_video")
+            meta_path = session / "metadata" / "douyin_meta.json"
+            if meta_path.exists():
+                self.artifacts.douyin_meta = meta_path
+            elif self._auto_publish_douyin(task):
+                self.artifacts.douyin_meta = _require_existing(meta_path, "douyin_meta")
+            else:
+                self.artifacts.douyin_meta = None
+            publish_path = session / "metadata" / "douyin_publish.json"
+            self.artifacts.douyin_publish = publish_path if publish_path.exists() else None
+            return
         raise RuntimeError(f"Unknown pipeline stage: {stage}")
 
     def _download(self, task: dict) -> None:
