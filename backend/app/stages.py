@@ -21,8 +21,6 @@ STAGES: tuple[StageSpec, ...] = (
     StageSpec("merge_video", "Merge video"),
     StageSpec("bilibili_meta", "Bilibili metadata"),
     StageSpec("bilibili_publish", "Bilibili publish"),
-    StageSpec("douyin_meta", "Douyin metadata"),
-    StageSpec("douyin_publish", "Douyin publish"),
 )
 
 
