@@ -147,10 +147,6 @@ export type YtdlpSettings = {
   proxy_port: string
 }
 
-export type OutputSettings = {
-  output_dir: string
-}
-
 export type AzureTtsSettings = {
   subscription_key: string
   has_subscription_key: boolean
@@ -760,17 +756,6 @@ export function getYtdlpSettings() {
 
 export function saveYtdlpSettings(settings: YtdlpSettings) {
   return request<YtdlpSettings>("/api/settings/ytdlp", {
-    method: "POST",
-    body: JSON.stringify(settings),
-  })
-}
-
-export function getOutputSettings() {
-  return request<OutputSettings>("/api/settings/output")
-}
-
-export function saveOutputSettings(settings: OutputSettings) {
-  return request<OutputSettings>("/api/settings/output", {
     method: "POST",
     body: JSON.stringify(settings),
   })

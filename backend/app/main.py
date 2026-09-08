@@ -146,10 +146,6 @@ class YtdlpSettingsUpdate(BaseModel):
     proxy_port: str = ""
 
 
-class OutputSettingsUpdate(BaseModel):
-    output_dir: str = ""
-
-
 class AzureTtsSettingsUpdate(BaseModel):
     subscription_key: str = ""
     clear_subscription_key: bool = False
@@ -188,21 +184,6 @@ def normalize_proxy_port(value: str) -> str:
     if port < 1 or port > 65535:
         raise HTTPException(status_code=422, detail="Proxy port must be between 1 and 65535.")
     return str(port)
-
-
-def normalize_output_dir(value: str) -> str:
-    from .adapters.export_video import resolve_output_dir
-
-    cleaned = value.strip().strip('"').strip("'")
-    if not cleaned:
-        return ""
-    try:
-        resolved = resolve_output_dir(cleaned)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if resolved is None:
-        return ""
-    return str(resolved)
 
 
 def normalize_translate_concurrency(value: str) -> str:
@@ -1162,10 +1143,7 @@ def _remove_task_named_files(
 
 
 def _cleanup_task_files(task: dict) -> dict[str, Any]:
-    """Remove on-disk artifacts for a task while keeping the DB record and log.
-
-    Intentionally does not touch the configured output/export directory.
-    """
+    """Remove on-disk artifacts for a task while keeping the DB record and log."""
     from .bilibili.staging import staging_dir
 
     task_id = task["id"]
@@ -1603,17 +1581,6 @@ def get_ytdlp_settings() -> dict:
 def save_ytdlp_settings(payload: YtdlpSettingsUpdate) -> dict:
     database.save_ytdlp_settings(normalize_proxy_port(payload.proxy_port))
     return get_ytdlp_settings()
-
-
-@app.get("/api/settings/output")
-def get_output_settings() -> dict:
-    return database.get_output_settings()
-
-
-@app.post("/api/settings/output")
-def save_output_settings(payload: OutputSettingsUpdate) -> dict:
-    database.save_output_settings(normalize_output_dir(payload.output_dir))
-    return get_output_settings()
 
 
 @app.get("/api/settings/azure-tts")

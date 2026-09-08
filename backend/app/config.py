@@ -27,7 +27,6 @@ YOUTUBE_COOKIE_PATH = COOKIE_DIR / "youtube.txt"
 WORKFOLDER = Path(os.getenv("WORKFOLDER", str(REPO_ROOT / "workfolder"))).expanduser()
 LOG_DIR = DATA_DIR / "logs"
 MODEL_CACHE_DIR = Path(os.getenv("MODEL_CACHE_DIR", str(DATA_DIR / "modelscope"))).expanduser()
-OUTPUT_DIR = (os.getenv("OUTPUT_DIR") or "").strip()
 
 _RUNTIME_SECURITY_LOCK = threading.Lock()
 _RUNTIME_SECURITY_SIGNATURE: tuple[str, ...] | None = None
@@ -250,12 +249,6 @@ ensure_ffmpeg_dll_search_path()
 def ytdlp_defaults() -> dict[str, str]:
     return {
         "proxy_port": os.getenv("YTDLP_PROXY_PORT", ""),
-    }
-
-
-def output_defaults() -> dict[str, str]:
-    return {
-        "output_dir": OUTPUT_DIR,
     }
 
 

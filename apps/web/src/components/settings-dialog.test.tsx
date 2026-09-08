@@ -43,9 +43,6 @@ describe("设置分项保存反馈", () => {
       if (method === "GET" && path === "/api/settings/ytdlp") {
         return jsonResponse({ proxy_port: "7890" })
       }
-      if (method === "GET" && path === "/api/settings/output") {
-        return jsonResponse({ output_dir: "D:/YouDubExports" })
-      }
       if (method === "GET" && path === "/api/settings/azure-tts") {
         return jsonResponse({
           subscription_key: "********",
@@ -76,9 +73,6 @@ describe("设置分项保存反馈", () => {
           { detail: "validation failed for cookie-secret and sk-secret" },
           422,
         )
-      }
-      if (method === "POST" && path === "/api/settings/output") {
-        return jsonResponse({ output_dir: "D:/YouDubExports" })
       }
       if (method === "POST" && path === "/api/settings/azure-tts") {
         return jsonResponse({
@@ -122,8 +116,8 @@ describe("设置分项保存反馈", () => {
     expect(results).toHaveTextContent("YouTube Cookie: 保存成功")
     expect(results).toHaveTextContent("OpenAI 设置: 保存成功")
     expect(results).toHaveTextContent("yt-dlp 设置: 保存失败 (HTTP 422)")
-    expect(results).toHaveTextContent("输出设置: 保存成功")
     expect(results).toHaveTextContent("Azure TTS 设置: 保存成功")
+    expect(results).not.toHaveTextContent("输出设置")
     expect(results).not.toHaveTextContent("cookie-secret")
     expect(results).not.toHaveTextContent("sk-secret")
 
@@ -138,7 +132,6 @@ describe("设置分项保存反馈", () => {
       "/api/cookies/youtube",
       "/api/settings/openai",
       "/api/settings/ytdlp",
-      "/api/settings/output",
       "/api/settings/azure-tts",
     ])
 
@@ -146,7 +139,6 @@ describe("设置分项保存反馈", () => {
       "/api/cookies/youtube",
       "/api/settings/openai",
       "/api/settings/ytdlp",
-      "/api/settings/output",
       "/api/settings/azure-tts",
     ]) {
       const getCount = mocks.fetch.mock.calls.filter(
@@ -181,9 +173,6 @@ describe("设置分项保存反馈", () => {
       }
       if (method === "GET" && path === "/api/settings/ytdlp") {
         return jsonResponse({ proxy_port: "7890" })
-      }
-      if (method === "GET" && path === "/api/settings/output") {
-        return jsonResponse({ output_dir: "D:/YouDubExports" })
       }
       if (method === "GET" && path === "/api/settings/azure-tts") {
         return jsonResponse({

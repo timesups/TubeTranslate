@@ -10,12 +10,10 @@ import {
   getCookieInfo,
   getOpenAIModels,
   getOpenAISettings,
-  getOutputSettings,
   getYtdlpSettings,
   saveAzureTtsSettings,
   saveCookie,
   saveOpenAISettings,
-  saveOutputSettings,
   saveYtdlpSettings,
   validateAzureTtsKeys,
 } from "@/lib/api"
@@ -49,7 +47,6 @@ type SettingsForm = {
   model: string
   translateConcurrency: string
   proxyPort: string
-  outputDir: string
   azureSubscriptionKey: string
   azureRegion: string
   azureVoice: string
@@ -64,7 +61,7 @@ const SAVED_API_KEY_MASK = "********"
 const SAVED_COOKIE_SENTINEL = "__YOUDUB_SAVED_COOKIE__"
 
 type MessageKey = "keySaved"
-type SaveSection = "cookie" | "openai" | "ytdlp" | "output" | "azure"
+type SaveSection = "cookie" | "openai" | "ytdlp" | "azure"
 type SaveResult = {
   section: SaveSection
   status: "saved" | "failed" | "unchanged"
@@ -78,7 +75,6 @@ const defaultSettings: SettingsForm = {
   model: "gpt-4o-mini",
   translateConcurrency: "8",
   proxyPort: "",
-  outputDir: "",
   azureSubscriptionKey: "",
   azureRegion: "eastasia",
   azureVoice: "zh-CN-XiaoxiaoNeural",
@@ -127,10 +123,9 @@ export function SettingsDialog() {
       getCookieInfo(),
       getOpenAISettings(),
       getYtdlpSettings(),
-      getOutputSettings(),
       getAzureTtsSettings(),
     ])
-      .then(([cookie, openai, ytdlp, output, azure]) => {
+      .then(([cookie, openai, ytdlp, azure]) => {
         setSettings({
           cookie: cookie.exists ? SAVED_COOKIE_SENTINEL : "",
           baseUrl: openai.base_url,
@@ -138,7 +133,6 @@ export function SettingsDialog() {
           model: openai.model,
           translateConcurrency: openai.translate_concurrency || "8",
           proxyPort: ytdlp.proxy_port,
-          outputDir: output.output_dir,
           azureSubscriptionKey: "",
           azureRegion: azure.region,
           azureVoice: azure.voice,
@@ -171,12 +165,11 @@ export function SettingsDialog() {
   }, [open])
 
   async function refreshSettingsFromServer() {
-    const [cookieResult, openaiResult, ytdlpResult, outputResult, azureResult] =
+    const [cookieResult, openaiResult, ytdlpResult, azureResult] =
       await Promise.allSettled([
         getCookieInfo(),
         getOpenAISettings(),
         getYtdlpSettings(),
-        getOutputSettings(),
         getAzureTtsSettings(),
       ])
 
@@ -194,9 +187,6 @@ export function SettingsDialog() {
       }
       if (ytdlpResult.status === "fulfilled") {
         refreshed.proxyPort = ytdlpResult.value.proxy_port
-      }
-      if (outputResult.status === "fulfilled") {
-        refreshed.outputDir = outputResult.value.output_dir
       }
       if (azureResult.status === "fulfilled") {
         const azure = azureResult.value
@@ -229,7 +219,7 @@ export function SettingsDialog() {
       setAzureVoicesLoaded(false)
     }
 
-    return [cookieResult, openaiResult, ytdlpResult, outputResult, azureResult].every(
+    return [cookieResult, openaiResult, ytdlpResult, azureResult].every(
       (result) => result.status === "fulfilled",
     )
   }
@@ -270,7 +260,6 @@ export function SettingsDialog() {
         translate_concurrency: settings.translateConcurrency,
       }))
       await saveSection("ytdlp", () => saveYtdlpSettings({ proxy_port: settings.proxyPort }))
-      await saveSection("output", () => saveOutputSettings({ output_dir: settings.outputDir }))
       const clearAzureKey = azureKeyDirty && !settings.azureSubscriptionKey.trim()
       await saveSection("azure", () => saveAzureTtsSettings({
         subscription_key: azureKeyDirty ? settings.azureSubscriptionKey : "",
@@ -402,7 +391,6 @@ export function SettingsDialog() {
     cookie: t.settings.cookie,
     openai: t.settings.openaiSaveSection,
     ytdlp: t.settings.ytdlpSaveSection,
-    output: t.settings.outputSaveSection,
     azure: t.settings.azureSaveSection,
   }
 
@@ -481,18 +469,6 @@ export function SettingsDialog() {
                   }
                   placeholder="7890"
                 />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="outputDir">{t.settings.outputDir}</Label>
-                <Input
-                  id="outputDir"
-                  value={settings.outputDir}
-                  onChange={(event) =>
-                    setSettings((current) => ({ ...current, outputDir: event.target.value }))
-                  }
-                  placeholder={t.settings.outputDirPlaceholder}
-                />
-                <p className="text-xs text-muted-foreground">{t.settings.outputDirHelp}</p>
               </div>
               <div className="grid gap-2">
                 <Label htmlFor="baseUrl">{t.settings.baseUrl}</Label>

@@ -179,39 +179,6 @@ class PipelineRunner:
         except ValueError:
             return database.DEFAULT_BILIBILI_GENERATE_META
 
-    def _export_final_video(self, final_video: Path, *, bilibili_meta: Path | None = None) -> None:
-        """Export only when Bilibili auto-publish is not enabled."""
-        from .adapters.export_video import export_final_video
-
-        task = database.get_task(self.task_id) or {}
-        if self._auto_publish_bilibili(task):
-            self.log("Skipped output-dir export because Bilibili auto-publish is enabled")
-            return
-
-        output_dir = database.get_output_settings().get("output_dir", "")
-        if not str(output_dir or "").strip():
-            self.log("Skipped output-dir export: OUTPUT_DIR / settings.output_dir is empty")
-            return
-        try:
-            exported = export_final_video(
-                final_video,
-                task_id=self.task_id,
-                title=task.get("title"),
-                output_dir=output_dir,
-                session=self.artifacts.session,
-                bilibili_meta=bilibili_meta or self.artifacts.bilibili_meta,
-            )
-        except Exception as exc:
-            self.log(f"Failed to export final video to output directory: {exc}")
-            return
-        if exported is None:
-            return
-        self.log(f"Exported final video -> {exported.video}")
-        if exported.description is not None:
-            self.log(f"Exported Bilibili description -> {exported.description}")
-        else:
-            self.log("Bilibili description was not found; skipped description export")
-
     def _stage_bilibili_package(self, final_video: Path) -> None:
         from .bilibili.staging import prepare_task_staging
 
@@ -304,12 +271,6 @@ class PipelineRunner:
         self._stage_handlers[stage](database.get_task(self.task_id))
         if stage == "merge_video" and self.artifacts.final_video is not None:
             database.update_task(self.task_id, final_video_path=str(self.artifacts.final_video))
-        if stage == "bilibili_meta" and self.artifacts.final_video is not None:
-            # Export finished package only for non-publish tasks (video + srt + 简介).
-            self._export_final_video(
-                self.artifacts.final_video,
-                bilibili_meta=self.artifacts.bilibili_meta,
-            )
         database.update_stage(
             self.task_id,
             stage,

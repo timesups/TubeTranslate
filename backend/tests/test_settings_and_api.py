@@ -673,12 +673,6 @@ def test_cleanup_task_files_keeps_record_and_log(monkeypatch, tmp_path):
     staged.write_bytes(b"staged")
     (staging_root / "Demo_Title__cleanupvid01.jpg").write_bytes(b"jpg")
 
-    output_dir = tmp_path / "exports"
-    output_dir.mkdir()
-    database.save_output_settings(str(output_dir))
-    (output_dir / "Demo_Title__cleanupvid01.mp4").write_bytes(b"export")
-    (output_dir / "Demo_Title__cleanupvid01.txt").write_text("desc", encoding="utf-8")
-
     client = authenticated_client()
     response = client.post(f"/api/tasks/{task_id}/cleanup-files")
 
@@ -691,8 +685,6 @@ def test_cleanup_task_files_keeps_record_and_log(monkeypatch, tmp_path):
     assert body["final_video_path"] is None
     assert not session.exists()
     assert not staged.exists()
-    assert (output_dir / "Demo_Title__cleanupvid01.mp4").exists()
-    assert (output_dir / "Demo_Title__cleanupvid01.txt").exists()
     assert log_file.exists()
     assert log_file.read_text(encoding="utf-8") == "keep this log"
     assert database.get_task(task_id) is not None

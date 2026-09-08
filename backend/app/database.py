@@ -12,7 +12,6 @@ from .config import (
     ensure_runtime_dirs,
     azure_tts_defaults,
     openai_defaults,
-    output_defaults,
     ytdlp_defaults,
 )
 from .stages import STAGES
@@ -129,11 +128,6 @@ def init_db() -> None:
             conn.execute(
                 "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
                 (f"ytdlp.{key}", value, now_iso()),
-            )
-        for key, value in output_defaults().items():
-            conn.execute(
-                "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
-                (f"output.{key}", value, now_iso()),
             )
         for key, value in azure_tts_defaults().items():
             conn.execute(
@@ -953,17 +947,6 @@ def get_ytdlp_settings() -> dict[str, str]:
 
 def save_ytdlp_settings(proxy_port: str) -> None:
     set_setting("ytdlp.proxy_port", proxy_port.strip())
-
-
-def get_output_settings() -> dict[str, str]:
-    defaults = output_defaults()
-    return {
-        "output_dir": get_setting("output.output_dir", defaults["output_dir"]),
-    }
-
-
-def save_output_settings(output_dir: str) -> None:
-    set_setting("output.output_dir", output_dir.strip().strip('"').strip("'"))
 
 
 def get_azure_tts_settings() -> dict[str, str]:

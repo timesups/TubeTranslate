@@ -28,7 +28,7 @@
 6. `split_audio` — 按句切分人声（云端 TTS 可能跳过）  
 7. `tts` — 语音合成  
 8. `merge_audio` — 合成配音轨  
-9. `merge_video` — 合成最终视频（可额外导出到 `OUTPUT_DIR`）  
+9. `merge_video` — 合成最终视频  
 10. `bilibili_meta` — 导出暂存包；用翻译 API 生成标题/简介/标签  
 11. `bilibili_publish` — 投稿到 B 站（自制稿，`copyright=1`）  
 
@@ -138,7 +138,6 @@ OPENAI_MODEL=deepseek-v4-flash
 |------|------|
 | `DEVICE` | `auto` / `cuda` / `cpu` / `mps` 等 |
 | `WORKFOLDER` | 任务会话与中间文件目录（默认 `./workfolder`） |
-| `OUTPUT_DIR` | 可选；完成后额外导出成片与字幕 |
 | `FFMPEG_PATH` / `FFPROBE_PATH` | FFmpeg 不在 PATH 时指定 |
 | `MERGE_VIDEO_ENCODER` | 合成视频编码：`auto`（默认）、`copy`、`x264`、`nvenc`、`qsv`、`amf`；`auto` 时竖屏优先 copy，横屏烧字幕优先 GPU |
 | `MERGE_VIDEO_CRF` / `MERGE_VIDEO_NVENC_PRESET` | 合成质量与 NVENC preset（默认 CRF/CQ 23、p4） |
