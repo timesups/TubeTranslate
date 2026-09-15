@@ -498,3 +498,114 @@ def test_pipeline_uses_uploaded_srt_and_skips_model_stages(monkeypatch, tmp_path
     assert "skipped Whisper" in log_content
     assert "skipped sentence splitting" in log_content
     assert "skipped OpenAI translation" in log_content
+
+
+def test_pipeline_source_srt_skips_whisper_but_still_translates(monkeypatch, tmp_path):
+    configure_db(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline, "WORKFOLDER", tmp_path)
+    item_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    task_url = f"local://file/{item_id}?direction=en-zh&filename=clip.mp4"
+    task_id = database.create_task(task_url, task_id=item_id)
+    session = tmp_path / "session"
+    for directory in ("media", "metadata", "segments/vocals", "segments/tts", "tmp"):
+        (session / directory).mkdir(parents=True, exist_ok=True)
+    subtitle_file = session / "metadata" / "source_subtitle.srt"
+    subtitle_file.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n"
+        "2\n00:00:01,200 --> 00:00:02,000\nWorld\n",
+        encoding="utf-8",
+    )
+    (session / "metadata" / "local_info.json").write_text(
+        json.dumps({"subtitle_path": str(subtitle_file), "subtitle_mode": "source"}),
+        encoding="utf-8",
+    )
+
+    def fail_whisper(*args, **kwargs):
+        raise AssertionError("Whisper should be skipped")
+
+    def fake_translate(asr_file, session_dir, settings, source, **kwargs):
+        _ = settings
+        _ = source
+        utterances = json.loads(asr_file.read_text(encoding="utf-8"))["result"]["utterances"]
+        payload = {
+            "translation": [
+                {
+                    "src": u["text"],
+                    "dst": "你好" if u["text"] == "Hello" else "世界",
+                    "src_lang": "en",
+                    "dst_lang": "zh",
+                    "start_time": u["start_time"],
+                    "end_time": u["end_time"],
+                    "speaker": "1",
+                }
+                for u in utterances
+            ]
+        }
+        out = session_dir / "metadata" / "translation.zh.json"
+        out.write_text(json.dumps(payload), encoding="utf-8")
+        return out
+
+    from backend.app.adapters import openai_translate
+
+    monkeypatch.setattr(openai_translate, "translate_asr", fake_translate)
+    monkeypatch.setattr(openai_translate, "_concurrency_from", lambda settings: 1)
+
+    whisper_module = types.ModuleType("backend.app.adapters.whisper_asr")
+    whisper_module.recognize_speech = fail_whisper
+    fixer_module = types.ModuleType("backend.app.adapters.asr_sentence_fixer")
+    fixer_module.fix_asr_sentences = fail_whisper
+    monkeypatch.setitem(sys.modules, "backend.app.adapters.whisper_asr", whisper_module)
+    monkeypatch.setitem(sys.modules, "backend.app.adapters.asr_sentence_fixer", fixer_module)
+
+    def download(self, task):
+        self.artifacts.session = session
+        self.artifacts.video_file = session / "media" / "video_source.mp4"
+        self.artifacts.video_file.write_bytes(b"mp4")
+        database.update_task(self.task_id, session_path=str(session), title="clip")
+
+    def separate(self, task):
+        self.artifacts.vocals_file = session / "media" / "audio_vocals.wav"
+        self.artifacts.bgm_file = session / "media" / "audio_bgm.wav"
+        self.artifacts.vocals_file.write_bytes(b"vocals")
+        self.artifacts.bgm_file.write_bytes(b"bgm")
+
+    def split_audio(self, task):
+        self.artifacts.vocals_dir = session / "segments" / "vocals"
+
+    def tts(self, task):
+        self.artifacts.tts_dir = session / "segments" / "tts"
+
+    def merge_audio(self, task):
+        self.artifacts.dubbing_file = session / "tmp" / "audio_dubbing.wav"
+        self.artifacts.timings_file = session / "metadata" / "timings.json"
+        self.artifacts.dubbing_file.write_bytes(b"dubbing")
+        self.artifacts.timings_file.write_text(
+            (session / "metadata" / "translation.zh.json").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+    def merge_video(self, task):
+        self.artifacts.final_video = session / "media" / "video_final.mp4"
+        self.artifacts.final_video.write_bytes(b"mp4")
+
+    monkeypatch.setattr(PipelineRunner, "_download", download)
+    monkeypatch.setattr(PipelineRunner, "_separate", separate)
+    monkeypatch.setattr(PipelineRunner, "_split_audio", split_audio)
+    monkeypatch.setattr(PipelineRunner, "_tts", tts)
+    monkeypatch.setattr(PipelineRunner, "_merge_audio", merge_audio)
+    monkeypatch.setattr(PipelineRunner, "_merge_video", merge_video)
+    monkeypatch.setattr(PipelineRunner, "_bilibili_meta", _noop_stage)
+    monkeypatch.setattr(PipelineRunner, "_bilibili_publish", _noop_stage)
+
+    PipelineRunner(task_id).run()
+
+    task = database.get_task(task_id)
+    translation = json.loads((session / "metadata" / "translation.zh.json").read_text(encoding="utf-8"))[
+        "translation"
+    ]
+    log_content = database.log_path(task_id).read_text(encoding="utf-8")
+    assert task["status"] == "succeeded"
+    assert [item["src"] for item in translation] == ["Hello", "World"]
+    assert [item["dst"] for item in translation] == ["你好", "世界"]
+    assert "skipped Whisper" in log_content
+    assert "skipped OpenAI translation" not in log_content

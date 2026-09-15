@@ -77,7 +77,7 @@ describe("本地视频字幕选择", () => {
     )
 
     const videoInput = screen.getByLabelText("本地视频文件") as HTMLInputElement
-    const subtitleInput = screen.getByLabelText("已翻译 SRT 字幕（可选）") as HTMLInputElement
+    const subtitleInput = screen.getByLabelText("已翻译 SRT/VTT 字幕（可选）") as HTMLInputElement
     expect(videoInput.accept).toBe(uploadContract.video_extensions.join(","))
     expect(videoInput.multiple).toBe(true)
     expect(videoInput.accept).not.toContain("video/*")
@@ -151,7 +151,7 @@ describe("本地视频字幕选择", () => {
     )
 
     const videoInput = screen.getByLabelText("本地视频文件") as HTMLInputElement
-    const subtitleInput = screen.getByLabelText("已翻译 SRT 字幕（可选）") as HTMLInputElement
+    const subtitleInput = screen.getByLabelText("已翻译 SRT/VTT 字幕（可选）") as HTMLInputElement
     const videoA = new File(["video-a"], "video-a.mp4", { type: "video/mp4" })
     const videoB = new File(["video-b"], "video-b.mp4", { type: "video/mp4" })
 

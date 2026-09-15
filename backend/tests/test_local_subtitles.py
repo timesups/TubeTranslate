@@ -41,6 +41,49 @@ def test_parse_srt_rejects_invalid_or_empty_content(content):
         local_subtitles.parse_srt(content)
 
 
+def test_parse_vtt_accepts_header_settings_and_short_timestamps():
+    cues = local_subtitles.parse_vtt(
+        "WEBVTT Kind: captions\n"
+        "Language: en\n\n"
+        "NOTE ignored block\n\n"
+        "1\n"
+        "00:00:01.000 --> 00:00:02.500 align:start\n"
+        "<b>First</b> line\n"
+        "Second line\n\n"
+        "00:03.000 --> 00:04.250\n"
+        "Short stamp\n"
+    )
+    assert len(cues) == 2
+    assert cues[0].start_time == 1000
+    assert cues[0].end_time == 2500
+    assert cues[0].text == "First line\nSecond line"
+    assert cues[1].start_time == 3000
+    assert cues[1].end_time == 4250
+    assert cues[1].text == "Short stamp"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "",
+        "NOT VTT\n\n00:00:01.000 --> 00:00:02.000\nHi\n",
+        "WEBVTT\n\n00:00:02.000 --> 00:00:01.000\nbad\n",
+    ],
+)
+def test_parse_vtt_rejects_invalid_or_empty_content(content):
+    with pytest.raises(ValueError):
+        local_subtitles.parse_vtt(content)
+
+
+def test_parse_subtitle_file_dispatches_by_extension(tmp_path):
+    srt = tmp_path / "a.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+    vtt = tmp_path / "b.vtt"
+    vtt.write_text("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello\n", encoding="utf-8")
+    assert local_subtitles.parse_subtitle_file(srt)[0].text == "Hello"
+    assert local_subtitles.parse_subtitle_file(vtt)[0].text == "Hello"
+
+
 def test_write_uploaded_subtitle_artifacts_outputs_pipeline_schema(tmp_path):
     subtitle = tmp_path / "subtitles.srt"
     subtitle.write_text(

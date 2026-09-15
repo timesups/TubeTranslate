@@ -90,13 +90,16 @@ class PackageItemPipelineRunner(PipelineRunner):
         from .adapters.local_video import import_path_video
 
         source = detect_source(task["url"])
+        subtitle_raw = str(self.item.get("subtitle_path") or "").strip()
+        subtitle_file = Path(subtitle_raw) if subtitle_raw else None
         session, info = import_path_video(
             Path(self.item["source_path"]),
             WORKFOLDER,
             self.package["id"],
             self.item["id"],
             source,
-            title=self.item.get("title") or info.get("title"),
+            title=self.item.get("title"),
+            subtitle_file=subtitle_file,
         )
         self.artifacts.session = session
         self.artifacts.video_file = session / "media" / "video_source.mp4"
@@ -106,7 +109,10 @@ class PackageItemPipelineRunner(PipelineRunner):
             session_path=str(session),
             title=title,
         )
-        self.stage_message("download", f"[local-file] {title or Path(self.item['source_path']).name} -> {session}")
+        note = f"[local-file] {title or Path(self.item['source_path']).name} -> {session}"
+        if subtitle_file is not None:
+            note = f"{note}; source SRT -> skipped Whisper ASR"
+        self.stage_message("download", note)
 
     def _merge_video(self, task: dict) -> None:
         super()._merge_video(task)

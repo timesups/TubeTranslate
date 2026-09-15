@@ -438,6 +438,7 @@ export type TaskPackageItem = {
   final_video_path: string | null
   exported_video_path: string | null
   exported_subtitle_path: string | null
+  subtitle_path?: string | null
   error_message: string | null
   created_at: string
   started_at: string | null
@@ -485,7 +486,8 @@ export function scanTaskPackage(payload: {
 }
 
 export function createTaskPackage(payload: {
-  source_dir: string
+  source_dir?: string
+  video_paths?: Array<{ path: string; subtitle?: string; subtitle_path?: string }>
   name?: string
   glob?: string
   recursive?: boolean
@@ -497,6 +499,7 @@ export function createTaskPackage(payload: {
   export_subtitle?: boolean
   continue_on_error?: boolean
   skip_if_export_exists?: boolean
+  auto_start?: boolean
 }) {
   return request<TaskPackage>("/api/task-packages", {
     method: "POST",

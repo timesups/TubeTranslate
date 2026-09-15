@@ -55,6 +55,7 @@ def init_package_tables(conn) -> None:
           final_video_path TEXT,
           exported_video_path TEXT,
           exported_subtitle_path TEXT,
+          subtitle_path TEXT,
           error_message TEXT,
           created_at TEXT NOT NULL,
           started_at TEXT,
@@ -85,6 +86,9 @@ def init_package_tables(conn) -> None:
         conn.execute(
             "ALTER TABLE task_packages ADD COLUMN pause_requested INTEGER NOT NULL DEFAULT 0"
         )
+    item_columns = {row["name"] for row in conn.execute("PRAGMA table_info(task_package_items)").fetchall()}
+    if "subtitle_path" not in item_columns:
+        conn.execute("ALTER TABLE task_package_items ADD COLUMN subtitle_path TEXT")
 
 
 def log_path(package_id: str) -> Path:
@@ -147,9 +151,9 @@ def create_package(
                 """
                 INSERT INTO task_package_items (
                   id, package_id, sort_index, source_path, relative_path, title,
-                  status, created_at
+                  subtitle_path, status, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
                 """,
                 (
                     item_id,
@@ -158,6 +162,7 @@ def create_package(
                     item["source_path"],
                     item.get("relative_path"),
                     item.get("title"),
+                    item.get("subtitle_path"),
                     created_at,
                 ),
             )

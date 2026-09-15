@@ -11,10 +11,20 @@ from ..sources import SourceConfig
 from .local_video import upload_dir
 
 
+SUPPORTED_SUBTITLE_SUFFIXES = frozenset({".srt", ".vtt"})
+
 SRT_TIME_RE = re.compile(
     r"^\s*(?P<start>\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*"
     r"(?P<end>\d{2}:\d{2}:\d{2}[,.]\d{3})"
 )
+
+# WebVTT allows HH:MM:SS.mmm or MM:SS.mmm; optional cue settings after the arrow.
+VTT_TIME_RE = re.compile(
+    r"^\s*(?P<start>(?:\d{1,2}:)?\d{1,2}:\d{2}\.\d{3})\s*-->\s*"
+    r"(?P<end>(?:\d{1,2}:)?\d{1,2}:\d{2}\.\d{3})"
+    r"(?:\s+\S.*)?$"
+)
+VTT_TAG_RE = re.compile(r"</?[^>]+>")
 
 
 @dataclass(frozen=True)
@@ -51,6 +61,40 @@ def _parse_srt_time(value: str) -> int:
     )
 
 
+def _parse_vtt_time(value: str) -> int:
+    cleaned = value.strip()
+    parts = cleaned.split(":")
+    if len(parts) == 3:
+        hours, minutes, rest = parts
+    elif len(parts) == 2:
+        hours = "0"
+        minutes, rest = parts
+    else:
+        raise ValueError(f"Invalid VTT timestamp: {value}")
+    if "." not in rest:
+        raise ValueError(f"Invalid VTT timestamp: {value}")
+    seconds, millis = rest.split(".", maxsplit=1)
+    if len(millis) != 3 or not millis.isdigit():
+        raise ValueError(f"Invalid VTT timestamp: {value}")
+    return (
+        int(hours) * 3_600_000
+        + int(minutes) * 60_000
+        + int(seconds) * 1000
+        + int(millis)
+    )
+
+
+def _strip_vtt_markup(text: str) -> str:
+    cleaned = VTT_TAG_RE.sub("", text)
+    cleaned = (
+        cleaned.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+    )
+    return cleaned.strip()
+
+
 def parse_srt(content: str) -> list[SubtitleCue]:
     normalized = content.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
     blocks = re.split(r"\n{2,}", normalized.strip())
@@ -83,6 +127,74 @@ def parse_srt(content: str) -> list[SubtitleCue]:
     return cues
 
 
+def parse_vtt(content: str) -> list[SubtitleCue]:
+    normalized = content.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    if not lines or not lines[0].strip().startswith("WEBVTT"):
+        raise ValueError("VTT file must start with WEBVTT header.")
+
+    # Drop header line and optional header metadata until the first blank line.
+    index = 1
+    while index < len(lines) and lines[index].strip():
+        index += 1
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+
+    cues: list[SubtitleCue] = []
+    while index < len(lines):
+        block_lines: list[str] = []
+        while index < len(lines) and lines[index].strip():
+            block_lines.append(lines[index].rstrip())
+            index += 1
+        while index < len(lines) and not lines[index].strip():
+            index += 1
+        if not block_lines:
+            continue
+
+        first = block_lines[0].strip()
+        upper = first.upper()
+        if upper.startswith("NOTE") or upper.startswith("STYLE") or upper.startswith("REGION"):
+            continue
+
+        timing_index = next((i for i, line in enumerate(block_lines) if "-->" in line), -1)
+        if timing_index < 0:
+            raise ValueError("VTT cue is missing a timing line.")
+
+        match = VTT_TIME_RE.match(block_lines[timing_index])
+        if not match:
+            raise ValueError(f"Invalid VTT timing line: {block_lines[timing_index]}")
+
+        text = _strip_vtt_markup("\n".join(block_lines[timing_index + 1 :]))
+        if not text:
+            continue
+        start = _parse_vtt_time(match.group("start"))
+        end = _parse_vtt_time(match.group("end"))
+        if end <= start:
+            raise ValueError(f"VTT cue end time must be after start time: {block_lines[timing_index]}")
+        cues.append(SubtitleCue(start_time=start, end_time=end, text=text))
+
+    if not cues:
+        raise ValueError("VTT file does not contain any subtitle cues.")
+    return cues
+
+
+def parse_subtitle_content(content: str, *, suffix: str) -> list[SubtitleCue]:
+    cleaned = (suffix or "").lower()
+    if cleaned == ".srt":
+        return parse_srt(content)
+    if cleaned == ".vtt":
+        return parse_vtt(content)
+    raise ValueError(f"Unsupported subtitle format: {suffix or '(none)'}")
+
+
+def parse_subtitle_file(path: Path) -> list[SubtitleCue]:
+    suffix = path.suffix.lower()
+    if suffix not in SUPPORTED_SUBTITLE_SUFFIXES:
+        raise ValueError("Only .srt and .vtt subtitle files are supported.")
+    content = path.read_text(encoding="utf-8-sig")
+    return parse_subtitle_content(content, suffix=suffix)
+
+
 def _translation_items(cues: list[SubtitleCue], source: SourceConfig) -> list[dict[str, Any]]:
     return [
         {
@@ -102,8 +214,7 @@ def _uploaded_subtitle_payloads(
     subtitle_file: Path,
     source: SourceConfig,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    content = subtitle_file.read_text(encoding="utf-8-sig")
-    cues = parse_srt(content)
+    cues = parse_subtitle_file(subtitle_file)
     translation = _translation_items(cues, source)
 
     asr_payload = {

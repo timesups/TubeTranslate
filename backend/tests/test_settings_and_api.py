@@ -1656,9 +1656,9 @@ def test_upload_local_video_can_save_translated_srt(monkeypatch, tmp_path):
             {"direction": "en-zh", "execution_mode": "auto"},
             {
                 "file": ("clip.mp4", b"mp4data", "video/mp4"),
-                "subtitle_file": ("clip.vtt", b"WEBVTT", "text/vtt"),
+                "subtitle_file": ("clip.ass", b"[Script Info]", "text/plain"),
             },
-            "Only .srt subtitle files are supported.",
+            "Only .srt and .vtt subtitle files are supported.",
         ),
     ],
 )
@@ -1688,7 +1688,7 @@ def test_upload_local_video_validates_parameters_before_writing(
     assert not any((config.WORKFOLDER / "_uploads").glob("*"))
 
 
-def test_upload_local_video_rejects_non_srt_subtitle(monkeypatch, tmp_path):
+def test_upload_local_video_rejects_unsupported_subtitle_extension(monkeypatch, tmp_path):
     configure_tmp_runtime(monkeypatch, tmp_path)
     client = authenticated_client()
 
@@ -1697,12 +1697,41 @@ def test_upload_local_video_rejects_non_srt_subtitle(monkeypatch, tmp_path):
         data={"direction": "en-zh"},
         files={
             "file": ("clip.mp4", b"mp4data", "video/mp4"),
-            "subtitle_file": ("clip.vtt", b"WEBVTT", "text/vtt"),
+            "subtitle_file": ("clip.ass", b"[Script Info]", "text/plain"),
         },
     )
 
     assert response.status_code == 422
-    assert response.json()["detail"] == "Only .srt subtitle files are supported."
+    assert response.json()["detail"] == "Only .srt and .vtt subtitle files are supported."
+
+
+def test_upload_local_video_accepts_vtt_subtitle(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    enqueued: list[str] = []
+    monkeypatch.setattr(main.worker, "enqueue", lambda task_id: enqueued.append(task_id))
+    client = authenticated_client()
+    vtt = (
+        "WEBVTT\n\n"
+        "00:00:00.000 --> 00:00:01.000\n"
+        "Hello world\n"
+    )
+
+    response = client.post(
+        "/api/tasks/upload",
+        data={"direction": "en-zh"},
+        files={
+            "file": ("clip.mp4", b"mp4data", "video/mp4"),
+            "subtitle_file": ("clip.vtt", vtt.encode("utf-8"), "text/vtt"),
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert len(enqueued) == 1
+    assert body["id"] == enqueued[0]
+    subtitle_files = list((config.WORKFOLDER / "_uploads" / body["id"] / "subtitle").glob("*"))
+    assert len(subtitle_files) == 1
+    assert subtitle_files[0].suffix.lower() == ".vtt"
 
 
 def test_upload_local_video_rejects_malformed_srt_and_cleans_upload(monkeypatch, tmp_path):
@@ -1721,7 +1750,7 @@ def test_upload_local_video_rejects_malformed_srt_and_cleans_upload(monkeypatch,
     )
 
     assert response.status_code == 400
-    assert "Invalid SRT subtitle file" in response.json()["detail"]
+    assert "Invalid subtitle file" in response.json()["detail"]
     assert enqueued == []
     assert database.list_tasks() == []
     assert not any((config.WORKFOLDER / "_uploads").glob("*"))

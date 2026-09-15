@@ -164,6 +164,7 @@ def import_path_video(
     source: SourceConfig,
     *,
     title: str | None = None,
+    subtitle_file: Path | None = None,
 ) -> tuple[Path, dict]:
     resolved = source_file.resolve()
     if not resolved.is_file():
@@ -179,6 +180,19 @@ def import_path_video(
         "asr_language": source.asr_language,
         "target_language": source.target_language,
     }
+    if subtitle_file is not None:
+        resolved_subtitle = subtitle_file.resolve()
+        if not resolved_subtitle.is_file():
+            raise FileNotFoundError(f"Package source subtitle not found: {resolved_subtitle}")
+        metadata_dir = session / "metadata"
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+        suffix = resolved_subtitle.suffix.lower() or ".srt"
+        if suffix not in {".srt", ".vtt"}:
+            raise ValueError("Only .srt and .vtt subtitle files are supported.")
+        stored_subtitle = metadata_dir / f"source_subtitle{suffix}"
+        shutil.copy2(resolved_subtitle, stored_subtitle)
+        info["subtitle_path"] = str(stored_subtitle)
+        info["subtitle_mode"] = "source"
     _prepare_session_video(resolved, session, source, info)
     return session, info
 
@@ -284,5 +298,6 @@ def import_local_video(url: str, workfolder: Path, source: SourceConfig) -> tupl
     }
     if subtitle_file:
         info["subtitle_path"] = str(subtitle_file)
+        info["subtitle_mode"] = "translated"
     _prepare_session_video(source_file, session, source, info)
     return session, info

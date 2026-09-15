@@ -13,7 +13,7 @@ from .devices import device_plan_summary
 from .runtime_checks import validate_runtime_device
 from .sources import detect_source
 from .stages import SILENT_VIDEO_SKIP_STAGES, STAGES
-from .youtube import is_local_upload_url
+from .youtube import is_local_file_url, is_local_upload_url
 
 
 SILENT_VIDEO_SKIP_MESSAGE = "Skipped: source has no audio track"
@@ -241,16 +241,40 @@ class PipelineRunner:
             return None
         return json.loads(metadata_file.read_text(encoding="utf-8"))
 
-    def _uploaded_subtitle_path(self, task: dict) -> Path | None:
-        if not is_local_upload_url(task["url"]):
-            return None
+    def _session_subtitle_path(self) -> Path | None:
         info = self._local_info()
         if not info:
             return None
         subtitle_path = str(info.get("subtitle_path") or "").strip()
         if not subtitle_path:
             return None
-        return _require_existing(Path(subtitle_path), "uploaded_subtitle_file")
+        return _require_existing(Path(subtitle_path), "session_subtitle_file")
+
+    def _subtitle_mode(self, task: dict) -> str | None:
+        info = self._local_info()
+        if not info or not str(info.get("subtitle_path") or "").strip():
+            return None
+        mode = str(info.get("subtitle_mode") or "").strip().lower()
+        if mode in {"source", "translated"}:
+            return mode
+        # Legacy local uploads treated attached SRT as already translated.
+        if is_local_upload_url(task["url"]):
+            return "translated"
+        if is_local_file_url(task["url"]):
+            return "source"
+        return None
+
+    def _uploaded_subtitle_path(self, task: dict) -> Path | None:
+        """Return session subtitle used to skip Whisper ASR (source or translated)."""
+        if self._subtitle_mode(task) is None:
+            return None
+        return self._session_subtitle_path()
+
+    def _translated_subtitle_path(self, task: dict) -> Path | None:
+        """Return subtitle only when translation itself should be skipped."""
+        if self._subtitle_mode(task) != "translated":
+            return None
+        return self._session_subtitle_path()
 
     def _write_uploaded_asr_artifact(self, task: dict) -> Path:
         from .adapters.local_subtitles import write_uploaded_asr_artifact
@@ -481,9 +505,11 @@ class PipelineRunner:
             items = _json.loads(
                 self.artifacts.asr_file.read_text(encoding="utf-8")
             )["result"]["utterances"]
+            mode = self._subtitle_mode(task) or "uploaded"
+            label = "translated SRT" if mode == "translated" else "source SRT"
             self.stage_message(
                 "asr",
-                f"Used uploaded SRT subtitles ({len(items)} cues) -> {self.artifacts.asr_file.name}; skipped Whisper",
+                f"Used {label} ({len(items)} cues) -> {self.artifacts.asr_file.name}; skipped Whisper",
             )
             return
 
@@ -540,7 +566,7 @@ class PipelineRunner:
 
         session = _require(self.artifacts.session, "session")
         source = detect_source(task["url"])
-        subtitle_file = self._uploaded_subtitle_path(task)
+        subtitle_file = self._translated_subtitle_path(task)
         if subtitle_file:
             from .adapters.local_subtitles import write_uploaded_translation_artifact
 
@@ -567,6 +593,7 @@ class PipelineRunner:
             "translate",
             (
                 f"Using model {settings['model']} at {settings['base_url']} "
+
                 f"({source.asr_language}->{source.target_language}, concurrency={concurrency})"
             ),
         )

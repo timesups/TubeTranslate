@@ -515,3 +515,86 @@ def test_package_item_silent_video_exports_source_copy(monkeypatch, tmp_path):
     assert stages["separate"]["status"] == "succeeded"
     assert stages["asr"]["last_message"] == "Skipped: source has no audio track"
     assert stages["merge_video"]["last_message"] == "Skipped: source has no audio track"
+
+
+def test_create_task_package_with_video_paths_and_subtitles(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    source_dir = tmp_path / "course"
+    source_dir.mkdir()
+    video_a = source_dir / "a.mp4"
+    video_b = source_dir / "b.mp4"
+    video_a.write_bytes(b"a")
+    video_b.write_bytes(b"b")
+    subtitle_a = source_dir / "a.srt"
+    subtitle_a.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+    enqueued: list[str] = []
+    monkeypatch.setattr("backend.app.main.worker.enqueue_package", lambda package_id: enqueued.append(package_id))
+    client = authenticated_client()
+
+    response = client.post(
+        "/api/task-packages",
+        json={
+            "video_paths": [
+                {"path": str(video_a), "subtitle": str(subtitle_a)},
+                {"path": str(video_b)},
+            ],
+            "name": "Course",
+            "direction": "en-zh",
+            "skip_if_export_exists": False,
+            "auto_start": True,
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["name"] == "Course"
+    assert body["already_existed"] is False
+    assert len(body["items"]) == 2
+    by_title = {item["title"]: item for item in body["items"]}
+    assert by_title["a"]["subtitle_path"] == str(subtitle_a.resolve())
+    assert by_title["b"]["subtitle_path"] in (None, "")
+    assert enqueued == [body["id"]]
+
+
+def test_create_task_package_rejects_both_source_dir_and_video_paths(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    source_dir = tmp_path / "both"
+    source_dir.mkdir()
+    video = source_dir / "clip.mp4"
+    video.write_bytes(b"x")
+    client = authenticated_client()
+    response = client.post(
+        "/api/task-packages",
+        json={
+            "source_dir": str(source_dir),
+            "video_paths": [{"path": str(video)}],
+            "direction": "en-zh",
+        },
+    )
+    assert response.status_code == 422
+    assert "exactly one" in str(response.json()["detail"]).lower()
+
+
+def test_build_items_from_video_paths_validates_subtitle(tmp_path):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"x")
+    bad_srt = tmp_path / "clip.srt"
+    bad_srt.write_text("not a subtitle", encoding="utf-8")
+    with pytest.raises(ValueError, match="Invalid subtitle"):
+        package_tasks.build_items_from_video_paths(
+            [{"path": str(video), "subtitle": str(bad_srt)}]
+        )
+
+
+def test_build_items_from_video_paths_accepts_vtt(tmp_path):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"x")
+    vtt = tmp_path / "clip.vtt"
+    vtt.write_text(
+        "WEBVTT\n\n00:00:00.000 --> 00:00:01.500\nHello from VTT\n",
+        encoding="utf-8",
+    )
+    root, items = package_tasks.build_items_from_video_paths(
+        [{"path": str(video), "subtitle": str(vtt)}]
+    )
+    assert root == tmp_path
+    assert items[0]["subtitle_path"] == str(vtt.resolve())

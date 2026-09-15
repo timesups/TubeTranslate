@@ -18,12 +18,18 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, SecretStr
 
 from . import auth, database, runtime_security, worker
-from .adapters.local_subtitles import parse_srt, uploaded_subtitle_dir
+from .adapters.local_subtitles import parse_subtitle_file, uploaded_subtitle_dir
 from .adapters.local_video import remove_upload, uploaded_video_dir
 from .adapters.openai_client import validate_openai_base_url
 from .adapters.openai_translate import list_models as list_openai_models
 from .config import WORKFOLDER, YOUTUBE_COOKIE_PATH, ensure_runtime_dirs, package_export_dir_name
-from .package_tasks import scan_source_dir, validate_source_dir
+from .package_tasks import (
+    build_items_from_video_paths,
+    common_source_root,
+    scan_source_dir,
+    validate_source_dir,
+    validate_video_file,
+)
 from . import package_db
 from .pipeline import run_task
 from .runtime_checks import validate_runtime_device
@@ -35,7 +41,7 @@ from .youtube import LOCAL_UPLOAD_DIRECTIONS, is_local_upload_url, validate_vide
 from .bilibili.routes import router as bilibili_router
 
 ALLOWED_VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".flv", ".wmv"}
-ALLOWED_SUBTITLE_SUFFIXES = {".srt"}
+ALLOWED_SUBTITLE_SUFFIXES = {".srt", ".vtt"}
 LOCAL_UPLOAD_CHUNK_SIZE = 1024 * 1024
 MAX_LOCAL_UPLOAD_BYTES = int(os.getenv("LOCAL_UPLOAD_MAX_BYTES", str(4 * 1024 * 1024 * 1024)))
 MAX_LOCAL_SUBTITLE_BYTES = int(os.getenv("LOCAL_SUBTITLE_MAX_BYTES", str(20 * 1024 * 1024)))
@@ -92,7 +98,19 @@ class TaskPackageScan(BaseModel):
     skip_if_export_exists: bool = True
 
 
-class TaskPackageCreate(TaskPackageScan):
+class TaskPackageVideoPath(BaseModel):
+    path: str
+    subtitle: str | None = None
+    subtitle_path: str | None = None
+
+
+class TaskPackageCreate(BaseModel):
+    source_dir: str | None = None
+    video_paths: list[TaskPackageVideoPath] | None = None
+    glob: str | None = None
+    recursive: bool = False
+    output_suffix: str | None = None
+    skip_if_export_exists: bool = True
     name: str = ""
     direction: str = "en-zh"
     execution_mode: str = "auto"
@@ -100,6 +118,7 @@ class TaskPackageCreate(TaskPackageScan):
     tts_provider: str = "azure"
     export_subtitle: bool = False
     continue_on_error: bool = True
+    auto_start: bool = True
 
 
 class TaskPackageContinue(BaseModel):
@@ -626,27 +645,63 @@ def scan_task_package(payload: TaskPackageScan) -> dict:
 
 @app.post("/api/task-packages", status_code=201)
 def create_task_package(payload: TaskPackageCreate) -> dict:
+    has_source_dir = bool((payload.source_dir or "").strip())
+    has_video_paths = bool(payload.video_paths)
+    if has_source_dir == has_video_paths:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide exactly one of source_dir or video_paths.",
+        )
+
     try:
-        source_dir = validate_source_dir(payload.source_dir)
         export_dir = _normalize_package_export_dir(package_export_dir_name())
         direction = package_db.normalize_direction(payload.direction)
         execution_mode = database.normalize_execution_mode(payload.execution_mode)
         audio_mode = database.normalize_audio_mode(payload.audio_mode)
         tts_provider = database.normalize_tts_provider(payload.tts_provider)
-        source_root = package_db.normalize_source_root(source_dir)
-        existing_id = package_db.find_package_by_source_root(source_root)
-        if existing_id:
-            package = package_db.get_package(existing_id)
-            if package is None:
-                raise RuntimeError(f"Package {existing_id} was not persisted.")
-            package["already_existed"] = True
-            return package
-        files = scan_source_dir(
-            source_dir,
-            glob=payload.glob,
-            recursive=payload.recursive,
-            skip_if_export_exists=payload.skip_if_export_exists,
-        )
+
+        if has_video_paths:
+            assert payload.video_paths is not None
+            entries = [
+                {
+                    "path": item.path,
+                    "subtitle": item.subtitle,
+                    "subtitle_path": item.subtitle_path,
+                }
+                for item in payload.video_paths
+            ]
+            # Resolve videos first so we can dedupe by source_root before subtitle validation.
+            video_files = [validate_video_file(str(entry["path"] or "")) for entry in entries]
+            source_dir = common_source_root(video_files)
+            source_root = package_db.normalize_source_root(source_dir)
+            existing_id = package_db.find_package_by_source_root(source_root)
+            if existing_id:
+                package = package_db.get_package(existing_id)
+                if package is None:
+                    raise RuntimeError(f"Package {existing_id} was not persisted.")
+                package["already_existed"] = True
+                return package
+            source_dir, files = build_items_from_video_paths(
+                entries,
+                skip_if_export_exists=payload.skip_if_export_exists,
+            )
+            source_root = package_db.normalize_source_root(source_dir)
+        else:
+            source_dir = validate_source_dir(payload.source_dir or "")
+            source_root = package_db.normalize_source_root(source_dir)
+            existing_id = package_db.find_package_by_source_root(source_root)
+            if existing_id:
+                package = package_db.get_package(existing_id)
+                if package is None:
+                    raise RuntimeError(f"Package {existing_id} was not persisted.")
+                package["already_existed"] = True
+                return package
+            files = scan_source_dir(
+                source_dir,
+                glob=payload.glob,
+                recursive=payload.recursive,
+                skip_if_export_exists=payload.skip_if_export_exists,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -672,11 +727,13 @@ def create_task_package(payload: TaskPackageCreate) -> dict:
                 "source_path": item["source_path"],
                 "relative_path": item.get("relative_path"),
                 "title": item.get("title"),
+                "subtitle_path": item.get("subtitle_path"),
             }
             for item in files
         ],
     )
-    worker.enqueue_package(package_id)
+    if payload.auto_start:
+        worker.enqueue_package(package_id)
     package = package_db.get_package(package_id)
     if package is None:
         raise RuntimeError(f"Package {package_id} was not persisted.")
@@ -927,7 +984,7 @@ def _clean_subtitle_filename(filename: str | None) -> str:
         raise HTTPException(status_code=422, detail="Subtitle filename is required.")
     suffix = Path(original).suffix.lower()
     if suffix not in ALLOWED_SUBTITLE_SUFFIXES:
-        raise HTTPException(status_code=422, detail="Only .srt subtitle files are supported.")
+        raise HTTPException(status_code=422, detail="Only .srt and .vtt subtitle files are supported.")
     safe_stem = sanitize_text(Path(original).stem) or "subtitles"
     return f"{safe_stem}{suffix}"
 
@@ -956,13 +1013,13 @@ def _save_uploaded_file(file: UploadFile, destination: Path, *, max_bytes: int, 
     return total
 
 
-def _validate_uploaded_srt(path: Path) -> None:
+def _validate_uploaded_subtitle(path: Path) -> None:
     try:
-        parse_srt(path.read_text(encoding="utf-8-sig"))
+        parse_subtitle_file(path)
     except UnicodeDecodeError as exc:
-        raise HTTPException(status_code=400, detail="Invalid SRT subtitle file encoding.") from exc
+        raise HTTPException(status_code=400, detail="Invalid subtitle file encoding.") from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid SRT subtitle file: {exc}") from exc
+        raise HTTPException(status_code=400, detail=f"Invalid subtitle file: {exc}") from exc
 
 
 def _rollback_local_upload(task_id: str) -> None:
@@ -1023,7 +1080,7 @@ def upload_local_video(
                 max_bytes=MAX_LOCAL_SUBTITLE_BYTES,
                 too_large_detail="Uploaded subtitle is too large.",
             )
-            _validate_uploaded_srt(subtitle_path)
+            _validate_uploaded_subtitle(subtitle_path)
 
         url = f"local://upload/{task_id}?direction={direction}&filename={quote(original_name)}"
         database.create_task(

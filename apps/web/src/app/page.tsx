@@ -1054,7 +1054,7 @@ export default function Home() {
                   ref={subtitleInputRef}
                   id="local-subtitle"
                   type="file"
-                  accept=".srt"
+                  accept=".srt,.vtt"
                   onChange={selectLocalSubtitleFile}
                   disabled={hasUrl || !isSingleLocalFile}
                 />
