@@ -467,6 +467,7 @@ export type TaskPackage = {
   failed_count?: number
   retried_count?: number
   pause_requested?: boolean
+  already_existed?: boolean
   items?: TaskPackageItem[]
 }
 

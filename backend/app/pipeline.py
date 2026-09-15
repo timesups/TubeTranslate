@@ -12,8 +12,11 @@ from .config import WORKFOLDER
 from .devices import device_plan_summary
 from .runtime_checks import validate_runtime_device
 from .sources import detect_source
-from .stages import STAGES
+from .stages import SILENT_VIDEO_SKIP_STAGES, STAGES
 from .youtube import is_local_upload_url
+
+
+SILENT_VIDEO_SKIP_MESSAGE = "Skipped: source has no audio track"
 
 
 def _task_audio_mode(task: dict | None) -> str:
@@ -78,6 +81,7 @@ class PipelineRunner:
         self.task_id = task_id
         self.artifacts = PipelineArtifacts()
         self._progress_state: dict[str, tuple[int, float]] = {}
+        self._silent_video_passthrough = False
         self._stage_handlers: dict[str, Callable[[dict], None]] = {
             "download": self._download,
             "separate": self._separate,
@@ -120,6 +124,9 @@ class PipelineRunner:
                     database.update_stage(self.task_id, stage.name, progress=100)
                     self._restore_cached_stage(stage.name, database.get_task(self.task_id))
                     self.log(f"[{stage.name}] Reused cached output")
+                    continue
+                if self._silent_video_passthrough and stage.name in SILENT_VIDEO_SKIP_STAGES:
+                    self._complete_silent_video_skip_stage(stage.name)
                     continue
                 self._run_stage(stage.name)
                 database.raise_if_task_pause_requested(self.task_id)
@@ -281,6 +288,30 @@ class PipelineRunner:
         )
         self.log(f"[{stage}] Completed")
 
+    def _complete_silent_video_skip_stage(self, stage: str) -> None:
+        """Mark a post-separate media stage done without running ASR/TTS/remux."""
+        now = database.now_iso()
+        database.update_task(self.task_id, current_stage=stage)
+        database.update_stage(
+            self.task_id,
+            stage,
+            status="succeeded",
+            progress=100,
+            started_at=now,
+            completed_at=now,
+            error_message=None,
+            last_message=SILENT_VIDEO_SKIP_MESSAGE,
+        )
+        if stage == "merge_video":
+            final_video = _require(self.artifacts.final_video, "final_video")
+            database.update_task(self.task_id, final_video_path=str(final_video))
+            self._after_silent_video_finalized(final_video)
+        self.log(f"[{stage}] {SILENT_VIDEO_SKIP_MESSAGE}")
+
+    def _after_silent_video_finalized(self, final_video: Path) -> None:
+        """Hook for package export after silent-video passthrough."""
+        _ = final_video
+
     def _restore_cached_stage(self, stage: str, task: dict | None) -> None:
         if not task:
             raise RuntimeError("Missing task while restoring cached pipeline artifacts.")
@@ -291,10 +322,32 @@ class PipelineRunner:
         session = _require_existing(Path(session_path), "session")
         self.artifacts.session = session
 
+        from .adapters.ffmpeg import silent_video_marker_path
+
+        if stage in SILENT_VIDEO_SKIP_STAGES and silent_video_marker_path(session).exists():
+            self.artifacts.final_video = _require_existing(
+                session / "media" / "video_final.mp4",
+                "final_video",
+            )
+            self._silent_video_passthrough = True
+            return
+
         if stage == "download":
             self.artifacts.video_file = _require_existing(session / "media" / "video_source.mp4", "video_file")
             return
         if stage == "separate":
+            marker = silent_video_marker_path(session)
+            if marker.exists():
+                self.artifacts.final_video = _require_existing(
+                    session / "media" / "video_final.mp4",
+                    "final_video",
+                )
+                self.artifacts.video_file = _require_existing(
+                    session / "media" / "video_source.mp4",
+                    "video_file",
+                )
+                self._silent_video_passthrough = True
+                return
             self.artifacts.vocals_file = _require_existing(session / "media" / "audio_vocals.wav", "vocals_file")
             bgm_path = session / "media" / "audio_bgm.wav"
             if _replace_original_audio(task):
@@ -379,6 +432,22 @@ class PipelineRunner:
     def _separate(self, task: dict) -> None:
         session = _require(self.artifacts.session, "session")
         video_file = _require(self.artifacts.video_file, "video_file")
+        from .adapters.ffmpeg import (
+            copy_source_as_final_video,
+            video_has_audio_stream,
+            write_silent_video_marker,
+        )
+
+        if not video_has_audio_stream(video_file):
+            self.artifacts.final_video = copy_source_as_final_video(video_file, session)
+            write_silent_video_marker(session)
+            self._silent_video_passthrough = True
+            self.stage_message(
+                "separate",
+                f"No audio track; copied source as final -> {self.artifacts.final_video.name}",
+            )
+            return
+
         if _replace_original_audio(task):
             from .adapters.ffmpeg import extract_source_audio
 

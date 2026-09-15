@@ -633,6 +633,14 @@ def create_task_package(payload: TaskPackageCreate) -> dict:
         execution_mode = database.normalize_execution_mode(payload.execution_mode)
         audio_mode = database.normalize_audio_mode(payload.audio_mode)
         tts_provider = database.normalize_tts_provider(payload.tts_provider)
+        source_root = package_db.normalize_source_root(source_dir)
+        existing_id = package_db.find_package_by_source_root(source_root)
+        if existing_id:
+            package = package_db.get_package(existing_id)
+            if package is None:
+                raise RuntimeError(f"Package {existing_id} was not persisted.")
+            package["already_existed"] = True
+            return package
         files = scan_source_dir(
             source_dir,
             glob=payload.glob,
@@ -650,7 +658,7 @@ def create_task_package(payload: TaskPackageCreate) -> dict:
     package_name = payload.name.strip() or source_dir.name
     package_id = package_db.create_package(
         name=package_name,
-        source_root=str(source_dir),
+        source_root=source_root,
         output_suffix=export_dir,
         direction=direction,
         execution_mode=execution_mode,
@@ -672,6 +680,7 @@ def create_task_package(payload: TaskPackageCreate) -> dict:
     package = package_db.get_package(package_id)
     if package is None:
         raise RuntimeError(f"Package {package_id} was not persisted.")
+    package["already_existed"] = False
     return package
 
 

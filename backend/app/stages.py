@@ -28,3 +28,17 @@ STAGE_NAMES = tuple(stage.name for stage in STAGES)
 
 PACKAGE_STAGES: tuple[StageSpec, ...] = STAGES[:9]
 PACKAGE_STAGE_NAMES = tuple(stage.name for stage in PACKAGE_STAGES)
+
+# After separate detects a silent source, these media stages are marked succeeded
+# without running ASR / TTS / remux. Bilibili stages still run when enabled.
+SILENT_VIDEO_SKIP_STAGES: frozenset[str] = frozenset(
+    {
+        "asr",
+        "asr_fix",
+        "translate",
+        "split_audio",
+        "tts",
+        "merge_audio",
+        "merge_video",
+    }
+)

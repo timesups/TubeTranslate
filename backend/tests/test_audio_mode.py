@@ -88,6 +88,7 @@ def test_separate_replace_mode_extracts_source_audio(monkeypatch, tmp_path):
         return extracted
 
     monkeypatch.setattr("backend.app.adapters.ffmpeg.extract_source_audio", fake_extract)
+    monkeypatch.setattr("backend.app.adapters.ffmpeg.video_has_audio_stream", lambda _path: True)
     runner._separate(database.get_task(task_id))
 
     assert runner.artifacts.vocals_file == extracted

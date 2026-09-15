@@ -115,6 +115,7 @@ def create_package(
 ) -> str:
     package_id = str(uuid.uuid4())
     created_at = now_iso()
+    normalized_source_root = normalize_source_root(source_root)
     with connect() as conn:
         conn.execute(
             """
@@ -128,7 +129,7 @@ def create_package(
             (
                 package_id,
                 name.strip() or None,
-                source_root,
+                normalized_source_root,
                 output_suffix,
                 1 if export_subtitle else 0,
                 normalize_direction(direction),
@@ -168,6 +169,56 @@ def create_package(
                 [(item_id, stage.name, stage.label) for stage in PACKAGE_STAGES],
             )
     return package_id
+
+
+def normalize_source_root(source_root: str | Path) -> str:
+    """Canonical absolute path string used for package identity."""
+    path = Path(source_root).expanduser()
+    try:
+        return str(path.resolve(strict=False))
+    except OSError:
+        return str(path)
+
+
+def _source_roots_equivalent(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    try:
+        left_resolved = normalize_source_root(left)
+        right_resolved = normalize_source_root(right)
+    except OSError:
+        return left.casefold() == right.casefold()
+    if left_resolved == right_resolved:
+        return True
+    return left_resolved.casefold() == right_resolved.casefold()
+
+
+def find_package_by_source_root(source_root: str) -> str | None:
+    """Return the newest package id for the same source directory, if any."""
+    normalized = normalize_source_root(source_root)
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id FROM task_packages
+            WHERE source_root = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (normalized,),
+        ).fetchone()
+        if row:
+            return row["id"]
+        rows = conn.execute(
+            """
+            SELECT id, source_root FROM task_packages
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 500
+            """
+        ).fetchall()
+    for row in rows:
+        if _source_roots_equivalent(str(row["source_root"] or ""), normalized):
+            return row["id"]
+    return None
 
 
 def get_package(package_id: str) -> dict[str, Any] | None:

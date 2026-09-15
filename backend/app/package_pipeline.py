@@ -7,10 +7,10 @@ from . import database, package_db, runtime_security
 from .config import WORKFOLDER
 from .devices import device_plan_summary
 from .package_tasks import export_destination, export_package_item
-from .pipeline import PipelineArtifacts, PipelineRunner, _require, _require_existing
+from .pipeline import SILENT_VIDEO_SKIP_MESSAGE, PipelineRunner, _require, _require_existing
 from .runtime_checks import validate_runtime_device
 from .sources import detect_source
-from .stages import PACKAGE_STAGES
+from .stages import PACKAGE_STAGES, SILENT_VIDEO_SKIP_STAGES
 
 
 class PackageDeletedError(Exception):
@@ -124,6 +124,39 @@ class PackageItemPipelineRunner(PipelineRunner):
         )
         self.stage_message("merge_video", f"Exported -> {exported_video}")
 
+    def _complete_silent_video_skip_stage(self, stage: str) -> None:
+        now = database.now_iso()
+        package_db.update_package_item(self.item["id"], current_stage=stage)
+        package_db.update_package_item_stage(
+            self.item["id"],
+            stage,
+            status="succeeded",
+            progress=100,
+            started_at=now,
+            completed_at=now,
+            error_message=None,
+            last_message=SILENT_VIDEO_SKIP_MESSAGE,
+        )
+        if stage == "merge_video":
+            final_video = _require(self.artifacts.final_video, "final_video")
+            package_db.update_package_item(self.item["id"], final_video_path=str(final_video))
+            self._after_silent_video_finalized(final_video)
+        self.log(f"[{stage}] {SILENT_VIDEO_SKIP_MESSAGE}")
+
+    def _after_silent_video_finalized(self, final_video: Path) -> None:
+        exported_video = export_package_item(
+            final_video=final_video,
+            source_path=Path(self.item["source_path"]),
+            session=self.artifacts.session,
+        )
+        package_db.update_package_item(
+            self.item["id"],
+            final_video_path=str(final_video),
+            exported_video_path=str(exported_video),
+            exported_subtitle_path=None,
+        )
+        self.log(f"[merge_video] Exported silent passthrough -> {exported_video}")
+
     def run(self) -> None:
         task = self._refresh()
         status = self.item["status"]
@@ -160,6 +193,9 @@ class PackageItemPipelineRunner(PipelineRunner):
                     package_db.update_package_item_stage(self.item["id"], stage.name, progress=100)
                     self._restore_cached_stage(stage.name, self._refresh())
                     self.log(f"[{stage.name}] Reused cached output")
+                    continue
+                if self._silent_video_passthrough and stage.name in SILENT_VIDEO_SKIP_STAGES:
+                    self._complete_silent_video_skip_stage(stage.name)
                     continue
                 self._run_package_stage(stage.name)
                 package_db.raise_if_package_pause_requested(

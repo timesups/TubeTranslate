@@ -9,7 +9,11 @@ from .stages import STAGE_NAMES
 
 STAGE_OWN_ARTIFACTS: dict[str, tuple[str, ...]] = {
     "download": ("media", "metadata", "segments", "tmp"),
-    "separate": ("media/audio_vocals.wav", "media/audio_bgm.wav"),
+    "separate": (
+        "media/audio_vocals.wav",
+        "media/audio_bgm.wav",
+        "metadata/silent_video.json",
+    ),
     "asr": ("metadata/asr.json",),
     "asr_fix": ("metadata/asr_fixed.json",),
     "translate": ("metadata/translation_preprocess.json",),

@@ -443,6 +443,7 @@ def _serialize_task_fields(data: dict[str, Any]) -> dict[str, Any]:
     # Legacy Douyin columns may still exist on older DBs; drop from API payloads.
     data.pop("douyin_auto_publish", None)
     data.pop("douyin_generate_meta", None)
+    data.pop("asr_provider", None)
     if "pause_requested" in data:
         data["pause_requested"] = bool(data["pause_requested"])
     return data

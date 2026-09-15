@@ -459,3 +459,32 @@ def test_probe_video_size_uses_configured_ffprobe(monkeypatch):
 
     assert ffmpeg.probe_video_size(Path("video.mp4")) == (1920, 1080)
     assert commands[0][0] == "/opt/bin/ffprobe"
+
+
+def test_video_has_audio_stream_detects_missing_audio(monkeypatch, tmp_path):
+    video = tmp_path / "silent.mp4"
+    video.write_bytes(b"x")
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, capture_output=False, text=False, **kwargs):
+        commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setenv("FFPROBE_PATH", "ffprobe")
+    monkeypatch.setattr(ffmpeg.subprocess, "run", fake_run)
+
+    assert ffmpeg.video_has_audio_stream(video) is False
+    assert "-select_streams" in commands[0]
+    assert "a" in commands[0]
+
+
+def test_copy_source_as_final_video(tmp_path):
+    session = tmp_path / "session"
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"silent-bytes")
+    final_video = ffmpeg.copy_source_as_final_video(source, session)
+    assert final_video == session / "media" / "video_final.mp4"
+    assert final_video.read_bytes() == b"silent-bytes"
+    assert ffmpeg.silent_video_marker_path(session).name == "silent_video.json"
+    marker = ffmpeg.write_silent_video_marker(session)
+    assert marker.exists()

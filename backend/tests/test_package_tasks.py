@@ -181,7 +181,37 @@ def test_create_task_package_api_enqueues(monkeypatch, tmp_path):
     assert body["name"] == "My Batch"
     assert body["output_suffix"] == "Translate"
     assert len(body["items"]) == 1
+    assert body["already_existed"] is False
     assert enqueued == [body["id"]]
+
+
+def test_create_task_package_returns_existing_for_same_source_dir(monkeypatch, tmp_path):
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    source_dir = tmp_path / "reuse-batch"
+    source_dir.mkdir()
+    (source_dir / "clip.mp4").write_bytes(b"x")
+    enqueued: list[str] = []
+    monkeypatch.setattr("backend.app.main.worker.enqueue_package", lambda package_id: enqueued.append(package_id))
+    client = authenticated_client()
+
+    first = client.post(
+        "/api/task-packages",
+        json={"source_dir": str(source_dir), "name": "First", "direction": "en-zh"},
+    )
+    assert first.status_code == 201
+    first_body = first.json()
+    assert first_body["already_existed"] is False
+
+    second = client.post(
+        "/api/task-packages",
+        json={"source_dir": str(source_dir), "name": "Second", "direction": "en-zh"},
+    )
+    assert second.status_code == 201
+    second_body = second.json()
+    assert second_body["id"] == first_body["id"]
+    assert second_body["already_existed"] is True
+    assert second_body["name"] == "First"
+    assert enqueued == [first_body["id"]]
 
 
 def test_delete_running_task_package(monkeypatch, tmp_path):
@@ -391,3 +421,68 @@ def test_import_path_video_creates_session(monkeypatch, tmp_path):
     local_info = json.loads((session / "metadata" / "local_info.json").read_text(encoding="utf-8"))
     assert local_info["original_path"] == str(source_file.resolve())
     assert info["title"] == "clip"
+
+
+def test_package_item_silent_video_exports_source_copy(monkeypatch, tmp_path):
+    from backend.app import package_pipeline
+    from backend.app.package_pipeline import PackageItemPipelineRunner
+
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    source_dir = tmp_path / "videos"
+    source_dir.mkdir()
+    source = source_dir / "bumper.mp4"
+    source.write_bytes(b"silent-source")
+
+    package_id = package_db.create_package(
+        name="silent-batch",
+        source_root=str(source_dir),
+        output_suffix="Translate",
+        direction="en-zh",
+        execution_mode="auto",
+        audio_mode="replace",
+        tts_provider="azure",
+        export_subtitle=False,
+        continue_on_error=True,
+        skip_if_export_exists=False,
+        items=[
+            {
+                "source_path": str(source),
+                "relative_path": "bumper.mp4",
+                "title": "bumper",
+            }
+        ],
+    )
+    package = package_db.get_package(package_id)
+    assert package is not None
+    item = package["items"][0]
+    package_db.update_package_item(item["id"], status="queued")
+
+    session = tmp_path / "workfolder" / "packages" / package_id / "items" / f"{item['id']}__bumper"
+    media = session / "media"
+    media.mkdir(parents=True)
+    video = media / "video_source.mp4"
+    video.write_bytes(b"silent-source")
+
+    def fake_download(self, task):
+        self.artifacts.session = session
+        self.artifacts.video_file = video
+        package_db.update_package_item(self.item["id"], session_path=str(session))
+        self.stage_message("download", "imported")
+
+    monkeypatch.setattr(PackageItemPipelineRunner, "_download", fake_download)
+    monkeypatch.setattr("backend.app.adapters.ffmpeg.video_has_audio_stream", lambda _path: False)
+    monkeypatch.setattr(package_pipeline, "validate_runtime_device", lambda: None)
+    monkeypatch.setattr("backend.app.pipeline.device_plan_summary", lambda: "cpu")
+
+    PackageItemPipelineRunner(item, package).run()
+
+    refreshed = package_db.get_package_item(item["id"])
+    assert refreshed is not None
+    assert refreshed["status"] == "succeeded"
+    exported = Path(refreshed["exported_video_path"])
+    assert exported == source_dir / "Translate" / "bumper.mp4"
+    assert exported.read_bytes() == b"silent-source"
+    stages = {entry["name"]: entry for entry in refreshed["stages"]}
+    assert stages["separate"]["status"] == "succeeded"
+    assert stages["asr"]["last_message"] == "Skipped: source has no audio track"
+    assert stages["merge_video"]["last_message"] == "Skipped: source has no audio track"

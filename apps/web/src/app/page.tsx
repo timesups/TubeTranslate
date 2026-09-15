@@ -772,8 +772,12 @@ export default function Home() {
         continue_on_error: true,
         skip_if_export_exists: true,
       })
+      const itemCount = String(created.items?.length || created.item_count || 0)
       setPackageMessage(
-        t.home.packageCreateSummary.replace("{count}", String(created.items?.length || 0)),
+        (created.already_existed ? t.home.packageAlreadyExists : t.home.packageCreateSummary).replace(
+          "{count}",
+          itemCount,
+        ),
       )
       setPackageSourceDir("")
       setPackageScanCount(null)

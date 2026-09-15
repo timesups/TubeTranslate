@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import subprocess
 from functools import lru_cache
 from pathlib import Path
@@ -513,6 +514,59 @@ def _run_merge_encode(
     )
 
 
+def video_has_audio_stream(video_file: Path) -> bool:
+    """Return True when ffprobe finds at least one audio stream."""
+    result = subprocess.run(
+        [
+            ffprobe_binary(),
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "csv=p=0",
+            str(video_file.resolve()),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(
+            f"ffprobe failed while checking audio streams for {video_file.name}: "
+            f"{detail or result.returncode}"
+        )
+    return bool((result.stdout or "").strip())
+
+
+def silent_video_marker_path(session: Path) -> Path:
+    return session / "metadata" / "silent_video.json"
+
+
+def write_silent_video_marker(session: Path) -> Path:
+    metadata_dir = session / "metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    marker = silent_video_marker_path(session)
+    marker.write_text(
+        json.dumps({"reason": "no_audio_stream"}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return marker
+
+
+def copy_source_as_final_video(video_file: Path, session: Path) -> Path:
+    """Copy the source video to media/video_final.mp4 for silent passthrough."""
+    media_dir = session / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    final_video = media_dir / "video_final.mp4"
+    if not final_video.exists():
+        shutil.copy2(video_file, final_video)
+    return final_video
+
+
 def extract_source_audio(video_file: Path, session: Path) -> Path:
     """Extract the original mixed audio track for ASR / TTS reference use."""
     media_dir = session / "media"
@@ -520,6 +574,12 @@ def extract_source_audio(video_file: Path, session: Path) -> Path:
     vocals_file = media_dir / "audio_vocals.wav"
     if vocals_file.exists():
         return vocals_file
+
+    if not video_has_audio_stream(video_file):
+        raise RuntimeError(
+            f"Source video has no audio stream: {video_file.name}. "
+            "Silent videos should use passthrough instead of audio extraction."
+        )
 
     subprocess.run(
         [
