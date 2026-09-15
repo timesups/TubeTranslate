@@ -251,6 +251,45 @@ def write_chinese_srt(translation_file: Path, session: Path) -> Path | None:
     return output_file
 
 
+def write_bilingual_srt(translation_file: Path, session: Path) -> Path | None:
+    """Write a Chinese–English cue-aligned SRT (Chinese on the first line)."""
+    data = json.loads(translation_file.read_text(encoding="utf-8"))
+    translation = data.get("translation") or []
+    lines: list[str] = []
+    idx = 1
+    for item in translation:
+        start, end = _segment_times(item)
+        if end <= start:
+            continue
+        zh = _chinese_text(item)
+        en = _english_text(item)
+        if not zh and not en:
+            continue
+        body = "\n".join(part for part in (zh, en) if part)
+        lines.extend([str(idx), f"{_srt_time(start)} --> {_srt_time(end)}", body, ""])
+        idx += 1
+    if not lines:
+        return None
+    metadata_dir = session / "metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    output_file = metadata_dir / "subtitles.zh-en.srt"
+    output_file.write_text("\n".join(lines), encoding="utf-8")
+    return output_file
+
+
+def write_final_video_bilingual_srt(timings_file: Path, session: Path) -> Path | None:
+    bilingual = write_bilingual_srt(timings_file, session)
+    media_dir = session / "media"
+    sidecar = media_dir / "video_final.srt"
+    if bilingual is None:
+        if sidecar.exists():
+            sidecar.unlink()
+        return None
+    media_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(bilingual, sidecar)
+    return sidecar
+
+
 def probe_video_size(video_file: Path) -> tuple[int, int] | None:
     result = subprocess.run(
         [
@@ -616,6 +655,7 @@ def merge_video(
     media_dir = session / "media"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     media_dir.mkdir(parents=True, exist_ok=True)
+    write_final_video_bilingual_srt(timings_file, session)
     final_video = media_dir / "video_final.mp4"
     if final_video.exists():
         return final_video

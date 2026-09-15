@@ -137,6 +137,9 @@ def test_merge_video_skips_subtitles_for_portrait(monkeypatch, tmp_path):
     assert "-c:v" in final_command
     assert "copy" in final_command
     assert not (session / "metadata" / "subtitles.en.srt").exists()
+    bilingual = (session / "media" / "video_final.srt").read_text(encoding="utf-8")
+    assert "你好" in bilingual
+    assert "Hello there" in bilingual
 
 
 def test_merge_video_burns_landscape_english_subtitles(monkeypatch, tmp_path):
@@ -193,6 +196,9 @@ def test_merge_video_burns_landscape_english_subtitles(monkeypatch, tmp_path):
     burned = (session / "metadata" / "subtitles.en.srt").read_text(encoding="utf-8")
     assert "Hello there" in burned
     assert "你好" not in burned
+    bilingual = (session / "media" / "video_final.srt").read_text(encoding="utf-8")
+    assert "你好" in bilingual
+    assert "Hello there" in bilingual
 
 
 def test_merge_video_encoder_chain_auto_portrait_prefers_copy():
@@ -445,6 +451,41 @@ def test_write_srt_burns_english_only(tmp_path):
     assert "Hello world" in content
     assert "你好世界" not in content
     assert srt.name == "subtitles.en.srt"
+
+
+def test_write_bilingual_srt_puts_chinese_above_english(tmp_path):
+    session = tmp_path / "session"
+    metadata_dir = session / "metadata"
+    metadata_dir.mkdir(parents=True)
+    timings = metadata_dir / "timings.json"
+    timings.write_text(
+        json.dumps(
+            {
+                "translation": [
+                    {
+                        "start_time": 0,
+                        "end_time": 2000,
+                        "actual_start_time": 0,
+                        "actual_end_time": 2000,
+                        "src": "Hello world",
+                        "dst": "你好世界",
+                        "src_lang": "en",
+                        "dst_lang": "zh",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    sidecar = ffmpeg.write_final_video_bilingual_srt(timings, session)
+    assert sidecar == session / "media" / "video_final.srt"
+    content = sidecar.read_text(encoding="utf-8")
+    assert "你好世界" in content
+    assert "Hello world" in content
+    zh_pos = content.index("你好世界")
+    en_pos = content.index("Hello world")
+    assert zh_pos < en_pos
+    assert (session / "metadata" / "subtitles.zh-en.srt").exists()
 
 
 def test_probe_video_size_uses_configured_ffprobe(monkeypatch):

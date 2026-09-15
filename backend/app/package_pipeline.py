@@ -116,11 +116,12 @@ class PackageItemPipelineRunner(PipelineRunner):
             source_path=Path(self.item["source_path"]),
             session=self.artifacts.session,
         )
+        exported_subtitle = exported_video.with_suffix(".srt")
         package_db.update_package_item(
             self.item["id"],
             final_video_path=str(final_video),
             exported_video_path=str(exported_video),
-            exported_subtitle_path=None,
+            exported_subtitle_path=str(exported_subtitle) if exported_subtitle.exists() else None,
         )
         self.stage_message("merge_video", f"Exported -> {exported_video}")
 

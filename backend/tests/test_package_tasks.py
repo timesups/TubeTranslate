@@ -58,6 +58,35 @@ def test_export_package_item_writes_into_translate_folder(tmp_path):
     assert not (tmp_path / "Translate" / "clip.srt").exists()
 
 
+def test_export_package_item_copies_bilingual_srt(tmp_path):
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"src")
+    session = tmp_path / "session"
+    final_video = session / "media" / "video_final.mp4"
+    final_video.parent.mkdir(parents=True)
+    final_video.write_bytes(b"final")
+    metadata = session / "metadata"
+    metadata.mkdir(parents=True)
+    (metadata / "timings.json").write_text(
+        '{"translation":[{"start_time":0,"end_time":1200,"actual_start_time":0,'
+        '"actual_end_time":1200,"src":"Hello there","dst":"你好","src_lang":"en","dst_lang":"zh"}]}',
+        encoding="utf-8",
+    )
+
+    exported_video = package_tasks.export_package_item(
+        final_video=final_video,
+        source_path=source,
+        session=session,
+    )
+
+    exported_srt = tmp_path / "Translate" / "clip.srt"
+    assert exported_video == tmp_path / "Translate" / "clip.mp4"
+    assert exported_srt.exists()
+    content = exported_srt.read_text(encoding="utf-8")
+    assert "你好" in content
+    assert "Hello there" in content
+
+
 def test_create_and_get_task_package(monkeypatch, tmp_path):
     configure_tmp_runtime(monkeypatch, tmp_path)
     source_dir = tmp_path / "videos"

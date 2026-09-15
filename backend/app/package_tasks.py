@@ -4,6 +4,7 @@ import shutil
 from fnmatch import fnmatch
 from pathlib import Path
 
+from .adapters.export_video import resolve_bilingual_subtitle
 from .config import package_allowed_roots, package_export_dir_name, package_max_items
 
 DEFAULT_VIDEO_GLOBS = ("*.mp4", "*.mov", "*.mkv", "*.m4v", "*.webm", "*.avi", "*.flv", "*.wmv")
@@ -148,4 +149,7 @@ def export_package_item(
     destination = uniquify_destination(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(final_video, destination)
+    subtitle = resolve_bilingual_subtitle(final_video, session)
+    if subtitle is not None:
+        shutil.copy2(subtitle, destination.with_suffix(".srt"))
     return destination
