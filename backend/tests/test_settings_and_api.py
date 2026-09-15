@@ -1010,6 +1010,7 @@ def test_openai_settings_update_is_atomically_visible(monkeypatch, tmp_path):
 
 
 def test_openai_settings_read_uses_one_consistent_snapshot(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPENAI_TRANSLATE_CONCURRENCY", raising=False)
     configure_tmp_runtime(monkeypatch, tmp_path)
     database.save_openai_settings("https://saved.example/v1", "sk-saved", "saved-model")
     with database.connect() as conn:

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import Home from "@/app/page"
 import { LanguageProvider } from "@/lib/i18n"
 import uploadContract from "@/lib/upload-contract.json"
+import type { Task } from "@/lib/api"
 
 const mocks = vi.hoisted(() => ({
   fetch: vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(),
@@ -807,7 +808,7 @@ describe("任务批量重试", () => {
 
 describe("任务列表暂停与继续", () => {
   it("排队任务可暂停，已暂停任务可继续", async () => {
-    let tasks = [
+    let tasks: Omit<Task, "stages" | "session_path">[] = [
       {
         id: "queued-1",
         url: "https://example.com/queued-1",

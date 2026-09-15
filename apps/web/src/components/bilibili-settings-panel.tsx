@@ -152,6 +152,8 @@ export function BilibiliSettingsPanel({ active }: { active: boolean }) {
           {t.settings.bilibiliLoginQr}
         </Button>
         {qrImage ? (
+          // QR data URLs are generated locally and do not need image optimization.
+          // eslint-disable-next-line @next/next/no-img-element
           <img
             src={qrImage}
             alt="Bilibili QR"

@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, SecretStr
 
-from . import auth, database, runtime_security, worker
+from . import auth, database, package_execution, runtime_security, worker
 from .adapters.local_subtitles import parse_subtitle_file, uploaded_subtitle_dir
 from .adapters.local_video import remove_upload, uploaded_video_dir
 from .adapters.openai_client import validate_openai_base_url
@@ -244,15 +244,11 @@ async def lifespan(app: FastAPI):
     database.init_db()
     database.delete_expired_auth_sessions(database.now_iso())
     database.backfill_titles_from_metadata()
-    interrupted = database.reclaim_interrupted_tasks()
+    database.reclaim_interrupted_tasks()
     from . import package_db
 
-    interrupted_packages = package_db.reclaim_interrupted_packages()
+    package_db.reclaim_interrupted_packages()
     worker.start(run_task)
-    for task_id in interrupted:
-        worker.enqueue(task_id)
-    for package_id in interrupted_packages:
-        worker.enqueue_package(package_id)
     yield
 
 
@@ -323,6 +319,11 @@ app.add_middleware(
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.exception_handler(package_execution.PackageBusyError)
+async def package_busy_error(request: Request, exc: package_execution.PackageBusyError):
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
 def _clear_replaced_login_cookie(
@@ -756,6 +757,7 @@ def get_task_package(package_id: str) -> dict:
 
 
 @app.post("/api/task-packages/{package_id}/continue")
+@package_execution.require_idle
 def continue_task_package(package_id: str, payload: TaskPackageContinue | None = None) -> dict:
     package = package_db.get_package(package_id)
     if package is None:
@@ -788,6 +790,7 @@ def pause_task_package(package_id: str) -> dict:
 
 
 @app.post("/api/task-packages/{package_id}/retry-failed")
+@package_execution.require_idle
 def retry_failed_task_package(package_id: str) -> dict:
     package = package_db.get_package(package_id)
     if package is None:
@@ -808,22 +811,30 @@ def retry_failed_task_package(package_id: str) -> dict:
 
 
 def _purge_package(package_id: str) -> bool:
-    package = package_db.get_package(package_id)
-    if package is None:
-        return False
-    for item in package.get("items") or []:
-        item_log = package_db.item_log_path(item["id"])
-        if item_log.exists():
-            item_log.unlink(missing_ok=True)
-    session_root = WORKFOLDER / "packages" / package_id
-    if session_root.exists():
-        shutil.rmtree(session_root, ignore_errors=True)
-    log_file = package_db.log_path(package_id)
-    if log_file.exists():
-        log_file.unlink(missing_ok=True)
-    return package_db.delete_package(package_id)
+    with package_execution.operation_lock:
+        package = package_db.get_package(package_id)
+        if package is None:
+            return False
+        # Remove the record first so every worker stops at its next safe boundary.
+        package_db.delete_package(package_id)
+        session_root = WORKFOLDER / "packages" / package_id
+        logs = [package_db.item_log_path(item["id"]) for item in package.get("items") or []]
+        logs.append(package_db.log_path(package_id))
+
+        def cleanup() -> None:
+            shutil.rmtree(session_root, ignore_errors=True)
+            for path in logs:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Failed to remove deleted package log %s", path, exc_info=True)
+
+        if not package_execution.defer_cleanup(package_id, cleanup):
+            cleanup()
+        return True
 
 
+@package_execution.require_idle
 def _cleanup_package_files(package_id: str) -> dict[str, Any]:
     """Remove on-disk artifacts for a package while keeping the DB record and log."""
     package = package_db.get_package(package_id)

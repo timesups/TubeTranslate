@@ -161,6 +161,14 @@ def package_max_items() -> int:
     return max(1, min(500, value))
 
 
+def package_item_concurrency() -> int:
+    try:
+        value = int(os.getenv("PACKAGE_ITEM_CONCURRENCY", "3"))
+    except ValueError:
+        return 3
+    return max(1, min(3, value))
+
+
 def _ffmpeg_bin_directories() -> list[Path]:
     """Resolve directories that contain FFmpeg shared DLLs (Windows TorchCodec)."""
     candidates: list[Path] = []

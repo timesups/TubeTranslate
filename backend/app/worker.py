@@ -139,11 +139,9 @@ def start(run_task: Callable[[str], None], run_package: Callable[[str], None] | 
             return
         _thread = threading.Thread(target=_loop, args=(run_task, package_runner), daemon=True)
         _thread.start()
-    pending_tasks = [t for t in database.list_tasks() if t["status"] == "queued"]
-    for task in reversed(pending_tasks):
-        _queue.put(("task", task["id"]))
+    for task_id in database.pending_task_ids():
+        _queue.put(("task", task_id))
     from . import package_db
 
-    pending_packages = [p for p in package_db.list_packages(limit=500) if p["status"] in ("queued", "partial")]
-    for package in reversed(pending_packages):
-        _queue.put(("package", package["id"]))
+    for package_id in package_db.pending_package_ids():
+        _queue.put(("package", package_id))

@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import config
+from . import config, package_execution
 from .database import connect, now_iso
 from .stages import PACKAGE_STAGES, PACKAGE_STAGE_NAMES
 from .youtube import LOCAL_UPLOAD_DIRECTIONS
@@ -259,12 +259,28 @@ def get_package(package_id: str) -> dict[str, Any] | None:
     return package
 
 
+def get_package_header(package_id: str) -> dict[str, Any] | None:
+    """Refresh execution settings without loading every item and stage in the package."""
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM task_packages WHERE id = ?", (package_id,)).fetchone()
+    return _serialize_package(dict(row)) if row else None
+
+
 def get_package_item(item_id: str) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute("SELECT * FROM task_package_items WHERE id = ?", (item_id,)).fetchone()
     if not row:
         return None
     return _serialize_item_with_stages(dict(row))
+
+
+def pending_package_ids() -> list[str]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id FROM task_packages WHERE status IN ('queued', 'partial') "
+            "ORDER BY created_at ASC, rowid ASC"
+        ).fetchall()
+    return [str(row["id"]) for row in rows]
 
 
 def list_packages(limit: int = 50) -> list[dict[str, Any]]:
@@ -293,6 +309,23 @@ def update_package(package_id: str, **fields: Any) -> None:
         conn.execute(f"UPDATE task_packages SET {assignments} WHERE id = ?", values)
 
 
+def claim_package_item(item_id: str) -> bool:
+    with connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE task_package_items
+            SET status = 'running', started_at = COALESCE(started_at, ?), error_message = NULL
+            WHERE id = ? AND status IN ('pending', 'queued', 'paused')
+              AND EXISTS (
+                SELECT 1 FROM task_packages p WHERE p.id = task_package_items.package_id
+                AND p.status IN ('queued', 'running', 'partial') AND p.pause_requested = 0
+              )
+            """,
+            (now_iso(), item_id),
+        )
+    return cursor.rowcount == 1
+
+
 def update_package_item(item_id: str, **fields: Any) -> None:
     if not fields:
         return
@@ -314,6 +347,7 @@ def update_package_item_stage(item_id: str, name: str, **fields: Any) -> None:
         )
 
 
+@package_execution.require_idle
 def queue_package_for_continue(package_id: str) -> None:
     with connect() as conn:
         conn.execute(
@@ -371,14 +405,20 @@ def raise_if_package_pause_requested(package_id: str, *, item_id: str | None = N
 
     with connect() as conn:
         row = conn.execute(
-            "SELECT pause_requested FROM task_packages WHERE id = ?",
+            "SELECT pause_requested, status FROM task_packages WHERE id = ?",
             (package_id,),
         ).fetchone()
-    if row and row["pause_requested"]:
-        apply_package_pause(package_id, item_id=item_id)
+    if row and (row["pause_requested"] or row["status"] == "paused"):
+        if item_id:
+            with connect() as conn:
+                conn.execute("UPDATE task_package_items SET status = 'paused' WHERE id = ? AND status = 'running'", (item_id,))
+        # Keep the signal visible to every worker until the whole package has drained.
+        if not package_execution.is_active(package_id):
+            apply_package_pause(package_id, item_id=item_id)
         raise PauseRequested()
 
 
+@package_execution.require_idle
 def reset_failed_package_items(package_id: str) -> int:
     with connect() as conn:
         failed_items = conn.execute(

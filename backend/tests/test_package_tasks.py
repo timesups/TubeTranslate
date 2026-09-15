@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,94 @@ import pytest
 from backend.app import package_db, package_tasks
 from backend.app.adapters import local_video
 from backend.tests.test_settings_and_api import authenticated_client, configure_tmp_runtime
+
+
+def test_failed_export_never_exposes_partial_video(monkeypatch, tmp_path):
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"source")
+    final = tmp_path / "final.mp4"
+    final.write_bytes(b"complete video")
+
+    def interrupted_copy(_source, destination):
+        Path(destination).write_bytes(b"partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(shutil, "copy2", interrupted_copy)
+    with pytest.raises(OSError, match="disk full"):
+        package_tasks.export_package_item(final_video=final, source_path=source)
+    assert not package_tasks.export_destination(source).exists()
+    assert list((tmp_path / "Translate").iterdir()) == []
+
+
+def test_subtitle_export_failure_does_not_commit_video(monkeypatch, tmp_path):
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"source")
+    final = tmp_path / "final.mp4"
+    final.write_bytes(b"complete video")
+    subtitle = tmp_path / "final.srt"
+    subtitle.write_text("subtitle", encoding="utf-8")
+    original_copy = shutil.copy2
+
+    def copy_with_subtitle_failure(src, dst):
+        if src == subtitle:
+            raise OSError("subtitle copy failed")
+        return original_copy(src, dst)
+
+    monkeypatch.setattr(package_tasks, "resolve_bilingual_subtitle", lambda *_: subtitle)
+    monkeypatch.setattr(shutil, "copy2", copy_with_subtitle_failure)
+    with pytest.raises(OSError, match="subtitle copy failed"):
+        package_tasks.export_package_item(final_video=final, source_path=source)
+    assert list((tmp_path / "Translate").iterdir()) == []
+
+
+@pytest.mark.parametrize("duration,codec,expected", [(100, "h264", True), (20, "h264", False), (100, None, False)])
+def test_scan_and_explicit_paths_only_skip_complete_exports(monkeypatch, tmp_path, duration, codec, expected):
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"source")
+    export = package_tasks.export_destination(source)
+    export.parent.mkdir()
+    export.write_bytes(b"export")
+    monkeypatch.setattr(local_video, "_probe_media", lambda path: {
+        "duration": 100 if path == source else duration,
+        "video_codec": "h264" if path == source else codec,
+    })
+    scanned = package_tasks.scan_source_dir(tmp_path, skip_if_export_exists=True)
+    _, explicit = package_tasks.build_items_from_video_paths([{"path": str(source)}], skip_if_export_exists=True)
+    assert scanned[0]["will_skip"] is expected
+    assert explicit[0]["will_skip"] is expected
+
+
+def test_scan_checks_resolved_file_against_allowed_roots(monkeypatch, tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    linked = allowed / "link.mp4"
+    linked.write_bytes(b"link stand-in")
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"outside")
+    original_resolve = Path.resolve
+
+    def resolve_link(path, *args, **kwargs):
+        return outside if path == linked else original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setenv("PACKAGE_ALLOWED_ROOTS", str(allowed))
+    monkeypatch.setattr(Path, "resolve", resolve_link)
+    with pytest.raises(ValueError, match="video path must be under PACKAGE_ALLOWED_ROOTS"):
+        package_tasks.scan_source_dir(allowed)
+
+
+def test_export_checks_resolved_output_directory(monkeypatch, tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    source = allowed / "clip.mp4"
+    source.write_bytes(b"source")
+    destination = allowed / "Translate" / "clip.mp4"
+    original_resolve = Path.resolve
+    monkeypatch.setenv("PACKAGE_ALLOWED_ROOTS", str(allowed))
+    monkeypatch.setattr(Path, "resolve", lambda path, *args, **kwargs:
+                        tmp_path / "outside" / "clip.mp4" if path == destination
+                        else original_resolve(path, *args, **kwargs))
+    with pytest.raises(ValueError, match="export path must be under PACKAGE_ALLOWED_ROOTS"):
+        package_tasks.export_destination(source)
 
 
 def test_validate_source_dir_requires_existing_directory(tmp_path):

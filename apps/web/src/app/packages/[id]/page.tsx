@@ -128,7 +128,7 @@ export default function PackageDetailPage({ params }: { params: Promise<{ id: st
   }
 
   return (
-    <AppShell backHref="/" title={pkg?.name || t.home.packageSectionTitle}>
+    <AppShell backHref="/">
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 p-4">
         {pkg ? (
           <Card>

@@ -13,6 +13,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, 
 from pydantic import BaseModel, Field, ValidationError
 
 from ..sources import SourceConfig
+from .. import resource_limits
 from ._translate_prompts import PREPROCESS_PROMPT, TRANSLATE_RULES
 from .openai_client import normalize_openai_base_url
 
@@ -272,6 +273,11 @@ def _extract_json(raw: str) -> dict[str, Any]:
     )
 
 
+def _completion(client: OpenAI, **kwargs):
+    with resource_limits.slot(resource_limits.TRANSLATION_REQUESTS, resource_limits.current_check()):
+        return client.chat.completions.create(**kwargs)
+
+
 def _call_json(client: OpenAI, model: str, system: str, user: str) -> dict[str, Any]:
     # deepseek-v4 enables thinking by default; with JSON mode it often returns
     # empty content or "{}". Disable thinking for structured translation calls.
@@ -287,21 +293,23 @@ def _call_json(client: OpenAI, model: str, system: str, user: str) -> dict[str, 
         "extra_body": {"thinking": {"type": "disabled"}},
     }
     try:
-        response = client.chat.completions.create(
+        response = _completion(client,
             **kwargs,
             response_format={"type": "json_object"},
         )
     except Exception as format_exc:
+        resource_limits.check_interruption()
         log.debug("json_object/thinking options rejected, retrying plain: %s", format_exc)
         plain_kwargs = dict(kwargs)
         plain_kwargs.pop("extra_body", None)
         try:
-            response = client.chat.completions.create(
+            response = _completion(client,
                 **plain_kwargs,
                 response_format={"type": "json_object"},
             )
         except Exception:
-            response = client.chat.completions.create(**plain_kwargs)
+            resource_limits.check_interruption()
+            response = _completion(client, **plain_kwargs)
 
     texts = _message_text_candidates(response)
     if not texts:
@@ -488,10 +496,11 @@ def _translate_plain(
         "extra_body": {"thinking": {"type": "disabled"}},
     }
     try:
-        response = client.chat.completions.create(**kwargs)
+        response = _completion(client, **kwargs)
     except Exception:
+        resource_limits.check_interruption()
         kwargs.pop("extra_body", None)
-        response = client.chat.completions.create(**kwargs)
+        response = _completion(client, **kwargs)
     raw = _message_text(response)
     if not raw:
         raise ValueError("model returned empty plain translation")
@@ -570,6 +579,7 @@ def translate_sentence(
                 return _compact_fallback(text, dst, target_language)
             return dst
         except Exception as exc:
+            resource_limits.check_interruption()
             last_error = exc
             if not _is_retryable_translate_error(exc) or attempt + 1 >= TRANSLATE_RETRY:
                 break
@@ -581,6 +591,7 @@ def translate_sentence(
             return _compact_fallback(text, dst, target_language)
         return dst
     except Exception as plain_exc:
+        resource_limits.check_interruption()
         if gloss is not None:
             return gloss
         raise RuntimeError(
@@ -620,9 +631,11 @@ def translate_batch(
     results: list[str | None] = [None] * total
     done = 0
     lock = threading.Lock()
+    check = resource_limits.current_check()
 
     def work(index: int, text: str) -> tuple[int, str]:
-        return index, translate_sentence(text, source.target_language, client, model, system)
+        with resource_limits.check_context(check):
+            return index, translate_sentence(text, source.target_language, client, model, system)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(work, index, text) for index, text in enumerate(texts)]

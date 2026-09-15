@@ -986,6 +986,6 @@ export function publishBilibili(items: {
   )
 }
 
-export function getBilibiliJob(jobId: string) {
-  return request<BilibiliJob>(`/api/bilibili/jobs/${jobId}`)
+export function getBilibiliJob(jobId: string, options?: RequestInit) {
+  return request<BilibiliJob>(`/api/bilibili/jobs/${jobId}`, options)
 }

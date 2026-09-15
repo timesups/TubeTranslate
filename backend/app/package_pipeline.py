@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import traceback
+import threading
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
-from . import database, package_db, runtime_security
-from .config import WORKFOLDER
+from . import database, package_db, package_execution, resource_limits, runtime_security
+from .config import WORKFOLDER, package_item_concurrency
 from .devices import device_plan_summary
-from .package_tasks import export_destination, export_package_item
+from .package_tasks import export_destination, export_package_item, is_complete_export
 from .pipeline import SILENT_VIDEO_SKIP_MESSAGE, PipelineRunner, _require, _require_existing
 from .runtime_checks import validate_runtime_device
 from .sources import detect_source
@@ -41,12 +43,15 @@ class PackageItemPipelineRunner(PipelineRunner):
 
     def _refresh(self) -> dict:
         loaded_item = package_db.get_package_item(self.item["id"])
-        loaded_package = package_db.get_package(self.item["package_id"])
+        loaded_package = package_db.get_package_header(self.item["package_id"])
         if loaded_item is None or loaded_package is None:
             raise PackageDeletedError(self.item["package_id"])
         self.item = loaded_item
         self.package = loaded_package
         return package_db.synthesize_task_dict(self.item, self.package)
+
+    def _check_interruption(self) -> None:
+        _check_package(self.package["id"], item_id=self.item["id"])
 
     def log(self, message: str) -> None:
         _write_item_log(self.item["id"], message)
@@ -172,29 +177,18 @@ class PackageItemPipelineRunner(PipelineRunner):
                 return
             return
 
-        if status in ("pending", "queued"):
-            package_db.update_package_item(
-                self.item["id"],
-                status="running",
-                started_at=self.item.get("started_at") or database.now_iso(),
-                error_message=None,
-            )
-            self.log("Item started")
-        else:
-            package_db.update_package_item(self.item["id"], status="running")
-            self.log("Item continued")
+        self._check_interruption()
+        if not package_db.claim_package_item(self.item["id"]):
+            self._check_interruption()
+            return
+        self.log("Item continued" if status == "paused" else "Item started")
 
         execution_mode = self.package.get("execution_mode") or database.DEFAULT_EXECUTION_MODE
         try:
             validate_runtime_device()
             self.log(f"Device plan: {device_plan_summary()}")
             for stage in PACKAGE_STAGES:
-                if not package_db.package_exists(self.package["id"]):
-                    raise PackageDeletedError(self.package["id"])
-                package_db.raise_if_package_pause_requested(
-                    self.package["id"],
-                    item_id=self.item["id"],
-                )
+                self._check_interruption()
                 if self._stage_status(stage.name) == "succeeded":
                     package_db.update_package_item(self.item["id"], current_stage=stage.name)
                     package_db.update_package_item_stage(self.item["id"], stage.name, progress=100)
@@ -249,6 +243,13 @@ class PackageItemPipelineRunner(PipelineRunner):
             raise
 
     def _run_package_stage(self, stage: str) -> None:
+        task = self._refresh()
+        package_db.update_package_item(self.item["id"], current_stage=stage)
+        self.stage_message(stage, "Waiting for stage resources")
+        with resource_limits.stage_slot(stage, task, self._check_interruption), resource_limits.check_context(self._check_interruption):
+            self._execute_package_stage(stage)
+
+    def _execute_package_stage(self, stage: str) -> None:
         self._progress_state.pop(stage, None)
         task = self._refresh()
         package_db.update_package_item(self.item["id"], current_stage=stage)
@@ -321,6 +322,12 @@ def _finalize_package_status(package_id: str) -> None:
 
 
 def run_package(package_id: str) -> None:
+    with package_execution.run(package_id) as acquired:
+        if acquired:
+            _run_registered_package(package_id)
+
+
+def _run_registered_package(package_id: str) -> None:
     package = package_db.get_package(package_id)
     if package is None:
         return
@@ -338,6 +345,110 @@ def run_package(package_id: str) -> None:
         return
 
 
+def _check_package(package_id: str, *, item_id: str | None = None) -> None:
+    if not package_db.package_exists(package_id):
+        raise PackageDeletedError(package_id)
+    package_db.raise_if_package_pause_requested(package_id, item_id=item_id)
+
+
+def _run_item(item: dict, package: dict, stop_on_error: threading.Event | None = None) -> None:
+    package_id = package["id"]
+    _check_package(package_id, item_id=item["id"])
+    current = package_db.get_package_item(item["id"])
+    if current is None:
+        raise PackageDeletedError(package_id)
+    if current["status"] in ("succeeded", "skipped", "failed"):
+        return
+    try:
+        if package.get("skip_if_export_exists"):
+            with resource_limits.slot(resource_limits.IMPORT, lambda: _check_package(package_id)):
+                export_path = export_destination(Path(current["source_path"]))
+                complete = is_complete_export(export_path, Path(current["source_path"]))
+            _check_package(package_id, item_id=current["id"])
+            if complete:
+                package_db.update_package_item(
+                    current["id"], status="skipped", current_stage="done",
+                    exported_video_path=str(export_path), completed_at=database.now_iso(), error_message=None,
+                )
+                for stage in PACKAGE_STAGES:
+                    package_db.update_package_item_stage(
+                        current["id"], stage.name, status="succeeded", progress=100,
+                        last_message="Skipped because export already exists",
+                    )
+                _write_item_log(current["id"], f"Skipped existing export -> {export_path}")
+                return
+        PackageItemPipelineRunner(current, package).run()
+    except (PackageDeletedError, database.PauseRequested):
+        raise
+    except Exception as exc:
+        if not package_db.package_exists(package_id):
+            raise PackageDeletedError(package_id) from exc
+        if stop_on_error is not None:
+            stop_on_error.set()
+        package_db.update_package_item(
+            current["id"], status="failed", error_message=str(exc), completed_at=database.now_iso(),
+        )
+        raise
+
+
+def _run_parallel_items(package_id: str, package: dict) -> None:
+    concurrency = package_item_concurrency()
+    _write_package_log(package_id, f"Processing up to {concurrency} videos concurrently; GPU/audio/video limits=1, API limits=16")
+    items = iter(package.get("items") or [])
+    exhausted = False
+    interrupted: Exception | None = None
+    failure: Exception | None = None
+    stop_on_error = None if package.get("continue_on_error") else threading.Event()
+    active = set()
+    with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="package-item") as pool:
+        while active or not exhausted:
+            try:
+                _check_package(package_id)
+            except (PackageDeletedError, database.PauseRequested) as exc:
+                interrupted = exc
+                exhausted = True
+            while len(active) < concurrency and not exhausted and failure is None:
+                if stop_on_error is not None and stop_on_error.is_set():
+                    exhausted = True
+                    break
+                try:
+                    item = next(items)
+                except StopIteration:
+                    exhausted = True
+                    break
+                _check_package(package_id)
+                if item["status"] in ("succeeded", "skipped"):
+                    continue
+                if item["status"] == "failed":
+                    if not package.get("continue_on_error"):
+                        failure = RuntimeError(f"Stopped after failed item {item['id']}")
+                        exhausted = True
+                    continue
+                active.add(pool.submit(_run_item, item, package, stop_on_error))
+            if not active:
+                break
+            done, active = wait(active, timeout=0.1, return_when=FIRST_COMPLETED)
+            for future in done:
+                try:
+                    future.result()
+                except (PackageDeletedError, database.PauseRequested) as exc:
+                    interrupted = exc
+                    exhausted = True
+                except Exception as exc:
+                    if not package.get("continue_on_error"):
+                        failure = failure or exc
+                        exhausted = True
+            # On failure, already-started videos finish; no further videos are submitted.
+    if isinstance(interrupted, PackageDeletedError) or not package_db.package_exists(package_id):
+        raise PackageDeletedError(package_id)
+    if isinstance(interrupted, database.PauseRequested):
+        package_db.apply_package_pause(package_id)
+        raise interrupted
+    _check_package(package_id)
+    if failure is not None:
+        raise failure
+
+
 def _run_package_body(package_id: str, package: dict) -> None:
     if package["status"] in ("queued", "partial"):
         updates = {"status": "running"}
@@ -352,6 +463,11 @@ def _run_package_body(package_id: str, package: dict) -> None:
     continue_on_error = bool(package.get("continue_on_error"))
     try:
         validate_runtime_device()
+        if package.get("execution_mode") != "manual":
+            _run_parallel_items(package_id, package)
+            _finalize_package_status(package_id)
+            _write_package_log(package_id, "Package finished")
+            return
         for item in package.get("items") or []:
             if not package_db.package_exists(package_id):
                 raise PackageDeletedError(package_id)
@@ -371,7 +487,7 @@ def _run_package_body(package_id: str, package: dict) -> None:
                 continue
             if package.get("skip_if_export_exists"):
                 export_path = export_destination(Path(current["source_path"]))
-                if export_path.exists():
+                if is_complete_export(export_path, Path(current["source_path"])):
                     package_db.update_package_item(
                         current["id"],
                         status="skipped",
@@ -410,6 +526,8 @@ def _run_package_body(package_id: str, package: dict) -> None:
     except PackageDeletedError:
         raise
     except database.PauseRequested:
+        if package_db.package_exists(package_id):
+            package_db.apply_package_pause(package_id)
         raise
     except Exception as exc:
         if not package_db.package_exists(package_id):

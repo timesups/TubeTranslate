@@ -2,8 +2,87 @@ from __future__ import annotations
 
 import queue
 import threading
+import asyncio
 
 from backend.app import database, worker
+
+
+def test_lifespan_recovers_interrupted_jobs_exactly_once(monkeypatch, tmp_path):
+    from backend.app import main, package_db
+    from backend.tests.test_settings_and_api import configure_tmp_runtime
+
+    original_start = worker.start
+    original_enqueue = worker.enqueue
+    configure_tmp_runtime(monkeypatch, tmp_path)
+    task_id = database.create_task("https://www.youtube.com/watch?v=abcdefghijk")
+    database.update_task(task_id, status="running")
+    with database.connect() as conn:
+        conn.execute(
+            "INSERT INTO task_packages (id, status, source_root, output_suffix, direction, created_at) "
+            "VALUES ('interrupted', 'running', ?, 'Translate', 'en-zh', '2020-01-01')",
+            (str(tmp_path),),
+        )
+    work_queue = queue.Queue()
+
+    class DormantThread:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(main, "ensure_runtime_dirs", lambda: None)
+    monkeypatch.setattr(worker, "start", original_start)
+    monkeypatch.setattr(worker, "enqueue", original_enqueue)
+    monkeypatch.setattr(worker, "_thread", None)
+    monkeypatch.setattr(worker, "_queue", work_queue)
+    monkeypatch.setattr(worker.threading, "Thread", DormantThread)
+
+    async def startup():
+        async with main.lifespan(main.app):
+            assert database.get_task(task_id)["status"] == "queued"
+            assert package_db.get_package("interrupted")["status"] == "queued"
+            assert work_queue.get_nowait() == ("task", task_id)
+            assert work_queue.get_nowait() == ("package", "interrupted")
+            assert work_queue.empty()
+
+    asyncio.run(startup())
+
+
+def test_start_recovers_old_queued_jobs_without_list_limits(monkeypatch, tmp_path):
+    from backend.app import package_db
+
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "recovery.sqlite")
+    database.init_db()
+    with database.connect() as conn:
+        conn.executemany(
+            "INSERT INTO tasks (id, url, status, created_at) VALUES (?, ?, ?, ?)",
+            [("old-task", "local://old", "queued", "2020-01-01")]
+            + [(f"done-task-{i}", "local://done", "succeeded", "2021-01-01") for i in range(101)],
+        )
+        conn.executemany(
+            "INSERT INTO task_packages (id, status, source_root, output_suffix, direction, created_at) "
+            "VALUES (?, ?, ?, 'Translate', 'en-zh', ?)",
+            [("old-package", "queued", str(tmp_path), "2020-01-01")]
+            + [(f"done-package-{i}", "succeeded", str(tmp_path), "2021-01-01") for i in range(501)],
+        )
+    work_queue = queue.Queue()
+
+    class DormantThread:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(worker, "_thread", None)
+    monkeypatch.setattr(worker, "_queue", work_queue)
+    monkeypatch.setattr(worker.threading, "Thread", DormantThread)
+    worker.start(lambda _: None, lambda _: None)
+    assert work_queue.get_nowait() == ("task", "old-task")
+    assert work_queue.get_nowait() == ("package", "old-package")
+    assert work_queue.empty()
+    assert package_db.pending_package_ids() == ["old-package"]
 
 
 def test_worker_picks_up_pending_and_new_tasks(monkeypatch, tmp_path):

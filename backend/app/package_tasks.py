@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import math
 import os
 import shutil
+import tempfile
 from fnmatch import fnmatch
 from pathlib import Path
 
 from .adapters.local_subtitles import parse_subtitle_file
 from .adapters.export_video import resolve_bilingual_subtitle
 from .config import package_allowed_roots, package_export_dir_name, package_max_items
+from . import resource_limits
 
 DEFAULT_VIDEO_GLOBS = ("*.mp4", "*.mov", "*.mkv", "*.m4v", "*.webm", "*.avi", "*.flv", "*.wmv")
 
@@ -126,6 +129,7 @@ def scan_source_dir(
         resolved = entry.resolve()
         if _is_inside_translate_dir(resolved, source_dir):
             continue
+        _ensure_under_allowed_roots(resolved, label="video path")
         files.append(resolved)
         if len(files) > max_items:
             raise ValueError(f"At most {max_items} videos are allowed per package.")
@@ -136,7 +140,7 @@ def scan_source_dir(
     for path in files:
         relative = _relative_path(source_dir, path)
         export_path = export_destination(path)
-        will_skip = skip_if_export_exists and export_path.exists()
+        will_skip = skip_if_export_exists and is_complete_export(export_path, path)
         items.append(
             {
                 "source_path": str(path),
@@ -206,7 +210,7 @@ def build_items_from_video_paths(
     for video, subtitle in prepared:
         relative = _relative_path(source_root, video)
         export_path = export_destination(video)
-        will_skip = skip_if_export_exists and export_path.exists()
+        will_skip = skip_if_export_exists and is_complete_export(export_path, video)
         items.append(
             {
                 "source_path": str(video),
@@ -225,11 +229,37 @@ def export_destination(source_path: Path, suffix: str = "") -> Path:
     """Place the translated file in a sibling Translate/ folder with the same name."""
     _ = suffix  # legacy API argument; no longer used for naming
     source = source_path.resolve()
-    return source.parent / package_export_dir_name() / source.name
+    _ensure_under_allowed_roots(source, label="video path")
+    destination = (source.parent / package_export_dir_name() / source.name).resolve()
+    _ensure_under_allowed_roots(destination, label="export path")
+    return destination
+
+
+def is_complete_export(destination: Path, source_path: Path) -> bool:
+    """Validate existing exports, including files created before atomic export writes."""
+    from .adapters.local_video import _probe_media
+
+    _ensure_under_allowed_roots(destination.resolve(), label="export path")
+    if not destination.is_file() or destination.stat().st_size == 0:
+        return False
+    try:
+        duration = _probe_media(source_path).get("duration")
+        if not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0:
+            return False
+        probe = _probe_media(destination)
+        exported_duration = probe.get("duration")
+        return bool(
+            probe.get("video_codec")
+            and isinstance(exported_duration, (int, float))
+            and math.isfinite(exported_duration)
+            and exported_duration >= duration * 0.95
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def uniquify_destination(path: Path) -> Path:
-    if not path.exists():
+    if not path.exists() and not path.with_suffix(".srt").exists():
         return path
     stem = path.stem
     suffix = path.suffix
@@ -237,7 +267,7 @@ def uniquify_destination(path: Path) -> Path:
     index = 2
     while True:
         candidate = parent / f"{stem}({index}){suffix}"
-        if not candidate.exists():
+        if not candidate.exists() and not candidate.with_suffix(".srt").exists():
             return candidate
         index += 1
 
@@ -249,13 +279,41 @@ def export_package_item(
     output_suffix: str = "",
     session: Path | None = None,
 ) -> Path:
-    _ = session
+    # Keep name selection and commit together, including colliding subtitle sidecars.
+    with resource_limits.slot(resource_limits.EXPORT):
+        return _export_package_item(final_video=final_video, source_path=source_path,
+                                    output_suffix=output_suffix, session=session)
+
+
+def _export_package_item(
+    *, final_video: Path, source_path: Path, output_suffix: str = "", session: Path | None = None,
+) -> Path:
     source = source_path.resolve()
     destination = export_destination(source, output_suffix)
     destination = uniquify_destination(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(final_video, destination)
-    subtitle = resolve_bilingual_subtitle(final_video, session)
-    if subtitle is not None:
-        shutil.copy2(subtitle, destination.with_suffix(".srt"))
+    # The video name becomes visible only after both copies have completed.
+    temporary: list[Path] = []
+    subtitle_destination = destination.with_suffix(".srt")
+    _ensure_under_allowed_roots(subtitle_destination.resolve(), label="subtitle export path")
+    try:
+        def stage_copy(source_file: Path) -> Path:
+            fd, name = tempfile.mkstemp(prefix=".youdub-", suffix=".partial", dir=destination.parent)
+            os.close(fd)
+            path = Path(name)
+            temporary.append(path)
+            shutil.copy2(source_file, path)
+            if path.stat().st_size != source_file.stat().st_size:
+                raise OSError("Export copy is incomplete.")
+            return path
+
+        video_temp = stage_copy(final_video)
+        subtitle = resolve_bilingual_subtitle(final_video, session)
+        subtitle_temp = stage_copy(subtitle) if subtitle is not None else None
+        if subtitle_temp is not None:
+            subtitle_temp.replace(subtitle_destination)
+        video_temp.replace(destination)
+    finally:
+        for path in temporary:
+            path.unlink(missing_ok=True)
     return destination

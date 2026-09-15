@@ -7,7 +7,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Callable
 
-from . import database, runtime_security
+from . import database, resource_limits, runtime_security
 from .config import WORKFOLDER
 from .devices import device_plan_summary
 from .runtime_checks import validate_runtime_device
@@ -287,6 +287,11 @@ class PipelineRunner:
         return write_uploaded_asr_artifact(subtitle_file, session, source)
 
     def _run_stage(self, stage: str) -> None:
+        task = database.get_task(self.task_id)
+        with resource_limits.stage_slot(stage, task or {}):
+            self._execute_stage(stage)
+
+    def _execute_stage(self, stage: str) -> None:
         self._progress_state.pop(stage, None)
         database.update_task(self.task_id, current_stage=stage)
         database.update_stage(

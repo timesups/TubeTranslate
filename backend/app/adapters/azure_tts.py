@@ -14,7 +14,7 @@ from typing import Callable
 import httpx
 from pydub import AudioSegment
 
-from .. import database
+from .. import database, resource_limits
 
 DEFAULT_REGION = "eastasia"
 DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
@@ -436,7 +436,7 @@ def _request_speech_once(text: str, settings: dict[str, str]) -> AudioSegment:
     subscription_key = pool.acquire()
     headers = _auth_headers(subscription_key, output_format=output_format)
 
-    with httpx.Client(timeout=120.0) as client:
+    with resource_limits.slot(resource_limits.TTS_REQUESTS, resource_limits.current_check()), httpx.Client(timeout=120.0) as client:
         response = client.post(endpoint, headers=headers, content=ssml.encode("utf-8"))
         content_type = (response.headers.get("content-type") or "").lower()
         if response.status_code >= 400:
@@ -472,6 +472,7 @@ def _request_speech(text: str, settings: dict[str, str]) -> AudioSegment:
         try:
             return _request_speech_once(text, settings)
         except AzureTtsError as exc:
+            resource_limits.check_interruption()
             last_error = exc
             if not exc.retryable or attempt >= _REQUEST_ATTEMPTS:
                 raise
@@ -575,10 +576,13 @@ def generate_tts(
         return output_dir
 
     progress_lock = threading.Lock()
+    check = resource_limits.current_check()
 
     def synthesize_one(index: int, item: dict) -> None:
-        audio = synthesize_speech(_tts_text(item), resolved)
-        audio.export(output_dir / f"{index:04d}.wav", format="wav")
+        with resource_limits.check_context(check):
+            audio = synthesize_speech(_tts_text(item), resolved)
+            resource_limits.check_interruption()
+            audio.export(output_dir / f"{index:04d}.wav", format="wav")
 
     worker_note = f"x{concurrency}"
     if key_count > 1:

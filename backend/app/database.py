@@ -596,6 +596,14 @@ TASK_LIST_SORTS = {
 }
 
 
+def pending_task_ids() -> list[str]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id FROM tasks WHERE status = 'queued' ORDER BY created_at ASC, rowid ASC"
+        ).fetchall()
+    return [str(row["id"]) for row in rows]
+
+
 def list_tasks(limit: int = 100) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(

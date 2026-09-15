@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { Loader2, RefreshCw, Upload } from "lucide-react"
 
 import {
+  ApiError,
   BilibiliDraft,
   BilibiliJob,
   BilibiliPartition,
@@ -16,6 +17,7 @@ import {
   publishBilibili,
 } from "@/lib/api"
 import { useI18n } from "@/lib/i18n"
+import { useSerialPolling, type SerialPollingContext } from "@/lib/use-serial-polling"
 import { AppShell } from "@/components/app-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -33,6 +35,10 @@ import { cn } from "@/lib/utils"
 
 type DraftMap = Record<string, BilibiliDraft>
 type JobMap = Record<string, BilibiliJob>
+
+function loadSnapshot() {
+  return Promise.all([getBilibiliAuthStatus(), listBilibiliReady(), getBilibiliPartitions()])
+}
 
 function formatSize(bytes: number) {
   if (!bytes) return "0 B"
@@ -59,50 +65,68 @@ export default function PublishPage() {
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState("")
   const [error, setError] = useState("")
+  const [pollError, setPollError] = useState("")
   const [message, setMessage] = useState("")
 
   const readyItems = useMemo(() => items.filter((item) => item.ready), [items])
 
-  const refresh = useCallback(async () => {
-    setLoading(true)
+  const applySnapshot = useCallback(([auth, ready, parts]: Awaited<ReturnType<typeof loadSnapshot>>) => {
     setError("")
+    setLoggedIn(Boolean(auth.logged_in))
+    setUname(auth.uname || "")
+    setItems(ready.items)
+    setVideoDir(ready.video_dir)
+    setPartitions(parts)
+  }, [])
+
+  const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
-      const [auth, ready, parts] = await Promise.all([
-        getBilibiliAuthStatus(),
-        listBilibiliReady(),
-        getBilibiliPartitions(),
-      ])
-      setLoggedIn(Boolean(auth.logged_in))
-      setUname(auth.uname || "")
-      setItems(ready.items)
-      setVideoDir(ready.video_dir)
-      setPartitions(parts)
+      const snapshot = await loadSnapshot()
+      if (signal?.aborted) return
+      applySnapshot(snapshot)
     } catch (err) {
+      if (signal?.aborted) return
       setError(err instanceof Error ? err.message : t.publish.empty)
     } finally {
-      setLoading(false)
+      if (!signal?.aborted) setLoading(false)
     }
-  }, [t.publish.empty])
+  }, [applySnapshot, t.publish.empty])
 
   useEffect(() => {
-    void refresh()
-  }, [refresh])
+    const controller = new AbortController()
+    void loadSnapshot().then((snapshot) => {
+      if (!controller.signal.aborted) applySnapshot(snapshot)
+    }).catch((err: unknown) => {
+      if (!controller.signal.aborted) setError(err instanceof Error ? err.message : t.publish.empty)
+    }).finally(() => {
+      if (!controller.signal.aborted) setLoading(false)
+    })
+    return () => controller.abort()
+  }, [applySnapshot, t.publish.empty])
 
-  useEffect(() => {
-    const active = Object.values(jobs).filter(
-      (job) => job.status === "queued" || job.status === "uploading",
-    )
-    if (!active.length) return
-    const timer = window.setInterval(() => {
-      void Promise.all(
-        active.map(async (job) => {
-          const next = await getBilibiliJob(job.id)
-          setJobs((current) => ({ ...current, [job.id]: next }))
-        }),
-      )
-    }, 1500)
-    return () => window.clearInterval(timer)
-  }, [jobs])
+  const activeJobIds = JSON.stringify(Object.values(jobs)
+    .filter((job) => job.status === "queued" || job.status === "uploading")
+    .map((job) => job.id).sort())
+  const pollJobs = useCallback(async ({ signal, isCurrent }: SerialPollingContext) => {
+    const ids: string[] = JSON.parse(activeJobIds)
+    const results = await Promise.allSettled(ids.map((id) => getBilibiliJob(id, { signal })))
+    if (!isCurrent()) return
+    setPollError("")
+    results.forEach((result, index) => {
+      const id = ids[index]
+      if (result.status === "fulfilled") {
+        setJobs((current) => ({ ...current, [id]: result.value }))
+      } else {
+        const err: unknown = result.reason
+        const message = err instanceof Error ? err.message : t.publish.jobError
+        setPollError(message)
+        if (err instanceof ApiError && (err.status === 401 || err.status === 404)) {
+          setJobs((current) => ({ ...current, [id]: { ...current[id], status: "error", error: message } }))
+        }
+      }
+    })
+  }, [activeJobIds, t.publish.jobError])
+  useSerialPolling(pollJobs, 1500)
 
   function toggleSelected(id: string, checked: boolean) {
     setSelected((current) => {
@@ -200,7 +224,7 @@ export default function PublishPage() {
               ) : null}
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button type="button" variant="outline" onClick={() => void refresh()} disabled={loading}>
+              <Button type="button" variant="outline" onClick={() => { setLoading(true); setError(""); void refresh() }} disabled={loading}>
                 {loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
                 {t.publish.refresh}
               </Button>
@@ -244,9 +268,9 @@ export default function PublishPage() {
                 {t.publish.clearSelection}
               </Button>
             </div>
-            {error ? (
+            {error || pollError ? (
               <div className="rounded-lg border border-red-500/30 bg-red-950/40 px-3 py-2 text-sm text-red-300">
-                {error}
+                {error || pollError}
               </div>
             ) : null}
             {message ? (
