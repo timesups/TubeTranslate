@@ -20,18 +20,21 @@ import {
   ExecutionMode,
   StageStatus,
   Task,
+  BilibiliTaskMeta,
   cleanupTaskFiles,
   continueTask,
   deleteTask,
   finalVideoDownloadUrl,
   finalVideoUrl,
   getTask,
+  getTaskBilibiliMeta,
   getTaskLog,
   isAbortError,
   pauseTask,
   redoStage,
   rerunTask,
   resumeTask,
+  ApiError,
 } from "@/lib/api"
 import { bilibiliPartitionLabel } from "@/lib/bilibili-partitions"
 import { useI18n } from "@/lib/i18n"
@@ -95,6 +98,8 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
   const router = useRouter()
   const { stageLabel, statusLabel, t } = useI18n()
   const [task, setTask] = useState<Task | null>(null)
+  const [bilibiliMeta, setBilibiliMeta] = useState<BilibiliTaskMeta | null>(null)
+  const [copiedField, setCopiedField] = useState<string | null>(null)
   const [log, setLog] = useState("")
   const [error, setError] = useState("")
   const [deleteOpen, setDeleteOpen] = useState(false)
@@ -122,6 +127,23 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
       const next = await getTask(id, signal)
       if (!isCurrent()) return
       setTask(next)
+      const metaReady = next.stages.some(
+        (stage) => stage.name === "bilibili_meta" && stage.status === "succeeded",
+      )
+      if (metaReady) {
+        try {
+          const meta = await getTaskBilibiliMeta(id, signal)
+          if (isCurrent()) setBilibiliMeta(meta)
+        } catch (err) {
+          if (isCurrent() && !(err instanceof ApiError && err.status === 404)) {
+            // Keep previous meta on transient errors; clear only on hard 404.
+          } else if (isCurrent()) {
+            setBilibiliMeta(null)
+          }
+        }
+      } else if (isCurrent()) {
+        setBilibiliMeta(null)
+      }
       const logText = await getTaskLog(id, signal)
       if (isCurrent()) setLog(logText)
     } catch (err) {
@@ -130,6 +152,17 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
       }
     }
   }, [id, t.task.loadError])
+
+  const copyText = async (field: string, value: string) => {
+    if (!value) return
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopiedField(field)
+      window.setTimeout(() => setCopiedField((current) => (current === field ? null : current)), 1500)
+    } catch {
+      // Ignore clipboard failures in unsupported contexts.
+    }
+  }
 
   const invalidatePolling = useSerialPolling(pollTask)
 
@@ -388,6 +421,60 @@ export default function TaskDetailPage({ params }: { params: Promise<{ id: strin
                 <Download className="size-4" />
                 {t.task.download}
               </Button>
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {task?.stages.some((stage) => stage.name === "bilibili_meta") ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>{t.task.bilibiliMeta}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {bilibiliMeta && (bilibiliMeta.title || bilibiliMeta.desc) ? (
+                <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-[120px_1fr]">
+                  <dt className="text-muted-foreground">{t.task.bilibiliMetaTitle}</dt>
+                  <dd className="space-y-2">
+                    <p className="break-words font-medium">{bilibiliMeta.title || "—"}</p>
+                    {bilibiliMeta.title ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => copyText("title", bilibiliMeta.title)}
+                      >
+                        <FileText className="size-3.5" />
+                        {copiedField === "title" ? t.task.bilibiliMetaCopied : t.task.bilibiliMetaCopy}
+                      </Button>
+                    ) : null}
+                  </dd>
+                  <dt className="text-muted-foreground">{t.task.bilibiliMetaDesc}</dt>
+                  <dd className="space-y-2">
+                    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background/60 p-3 text-sm leading-relaxed">
+                      {bilibiliMeta.desc || "—"}
+                    </pre>
+                    {bilibiliMeta.desc ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => copyText("desc", bilibiliMeta.desc)}
+                      >
+                        <FileText className="size-3.5" />
+                        {copiedField === "desc" ? t.task.bilibiliMetaCopied : t.task.bilibiliMetaCopy}
+                      </Button>
+                    ) : null}
+                  </dd>
+                  {bilibiliMeta.tag ? (
+                    <>
+                      <dt className="text-muted-foreground">{t.task.bilibiliMetaTag}</dt>
+                      <dd className="break-words text-muted-foreground">{bilibiliMeta.tag}</dd>
+                    </>
+                  ) : null}
+                </dl>
+              ) : (
+                <p className="text-sm text-muted-foreground">{t.task.bilibiliMetaMissing}</p>
+              )}
             </CardContent>
           </Card>
         ) : null}

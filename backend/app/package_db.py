@@ -32,7 +32,7 @@ def init_package_tables(conn) -> None:
           export_subtitle INTEGER NOT NULL DEFAULT 0,
           direction TEXT NOT NULL,
           execution_mode TEXT NOT NULL DEFAULT 'auto',
-          audio_mode TEXT NOT NULL DEFAULT 'replace',
+          audio_mode TEXT NOT NULL DEFAULT 'keep_bgm',
           tts_provider TEXT NOT NULL DEFAULT 'azure',
           continue_on_error INTEGER NOT NULL DEFAULT 1,
           skip_if_export_exists INTEGER NOT NULL DEFAULT 1,

@@ -209,7 +209,7 @@ export default function Home() {
   const [localSubtitleFile, setLocalSubtitleFile] = useState<File | null>(null)
   const [localDirection, setLocalDirection] = useState<LocalDirection>("en-zh")
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("auto")
-  const [audioMode, setAudioMode] = useState<AudioMode>("replace")
+  const [audioMode, setAudioMode] = useState<AudioMode>("keep_bgm")
   const [ttsProvider, setTtsProvider] = useState<TtsProvider>("azure")
   const [bilibiliTid, setBilibiliTid] = useState(DEFAULT_BILIBILI_TID)
   const [bilibiliAutoPublish, setBilibiliAutoPublish] = useState(true)

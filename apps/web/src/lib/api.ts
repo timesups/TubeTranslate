@@ -835,6 +835,18 @@ export function finalVideoDownloadUrl(taskId: string) {
   return `/api/tasks/${taskId}/artifact/final-video?download=1`
 }
 
+export type BilibiliTaskMeta = {
+  title: string
+  desc: string
+  tag: string
+  dynamic: string
+  tid: number | null
+}
+
+export function getTaskBilibiliMeta(taskId: string, signal?: AbortSignal) {
+  return request<BilibiliTaskMeta>(`/api/tasks/${taskId}/artifact/bilibili-meta`, { signal })
+}
+
 export type BilibiliAuthStatus = {
   logged_in: boolean
   message?: string

@@ -153,11 +153,11 @@ def package_allowed_roots() -> list[Path]:
 
 
 def package_max_items() -> int:
-    raw = (os.getenv("PACKAGE_MAX_ITEMS") or "200").strip()
+    raw = (os.getenv("PACKAGE_MAX_ITEMS") or "400").strip()
     try:
         value = int(raw)
     except ValueError:
-        return 200
+        return 400
     return max(1, min(500, value))
 
 

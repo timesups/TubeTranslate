@@ -98,7 +98,7 @@ Content-Type: application/json
 | 字段 | 取值 |
 |---|---|
 | `execution_mode` | `auto` \| `manual` |
-| `audio_mode` | `replace` \| `keep_bgm` |
+| `audio_mode` | `replace` \| `keep_bgm`（**批任务默认 `keep_bgm`**：Demucs 人声分离 + 后期与 BGM 混音） |
 | `tts_provider` | `azure` \| `voxcpm`（`volcengine` 会归一为兼容值，勿新用） |
 | `direction`（本地/批任务） | `en-zh` \| `zh-en` |
 | 任务状态 | `queued` \| `running` \| `paused` \| `succeeded` \| `failed` |
@@ -232,7 +232,7 @@ POST /api/task-packages
   "name": "Course",
   "direction": "en-zh",
   "execution_mode": "auto",
-  "audio_mode": "replace",
+  "audio_mode": "keep_bgm",
   "tts_provider": "azure",
   "skip_if_export_exists": true,
   "continue_on_error": true,
@@ -258,7 +258,7 @@ POST /api/task-packages
   "name": "Course",
   "direction": "en-zh",
   "execution_mode": "auto",
-  "audio_mode": "replace",
+  "audio_mode": "keep_bgm",
   "tts_provider": "azure",
   "skip_if_export_exists": true,
   "continue_on_error": true,
@@ -294,7 +294,7 @@ POST /api/task-packages
 环境限制：
 
 - `PACKAGE_ALLOWED_ROOTS`：分号分隔的允许根路径；空=不限制
-- `PACKAGE_MAX_ITEMS`：默认 200，上限 500
+- `PACKAGE_MAX_ITEMS`：默认 400，上限 500
 - `PACKAGE_EXPORT_DIR_NAME`：默认 `Translate`
 
 ### 4.3 源语言字幕语义（重要）
@@ -383,7 +383,7 @@ payload = {
     "name": "My Course",
     "direction": "en-zh",
     "execution_mode": "auto",
-    "audio_mode": "replace",
+    "audio_mode": "keep_bgm",
     "tts_provider": "azure",
     "skip_if_export_exists": True,
     "continue_on_error": True,

@@ -57,6 +57,7 @@ def test_health_and_login_are_public(client):
         ("POST", "/api/tasks/batch-resume"),
         ("GET", "/api/tasks/missing/log"),
         ("GET", "/api/tasks/missing/artifact/final-video"),
+        ("GET", "/api/tasks/missing/artifact/bilibili-meta"),
         ("GET", "/api/cookies/youtube"),
         ("POST", "/api/cookies/youtube"),
         ("GET", "/api/settings/openai"),
@@ -317,10 +318,62 @@ def test_inline_video_download_and_range_requests_use_session_cookie(client, tmp
     assert inline.headers["cache-control"] == "no-store"
     assert download.status_code == 200
     assert download.headers["content-disposition"].startswith("attachment")
+    assert "video.mp4" in download.headers["content-disposition"]
     assert download.headers["cache-control"] == "no-store"
     assert ranged.status_code == 206
     assert ranged.content == b"2345"
     assert ranged.headers["cache-control"] == "no-store"
+
+
+def test_final_video_download_uses_original_title_filename(client, tmp_path):
+    login(client)
+    video = tmp_path / "video_final.mp4"
+    video.write_bytes(b"0123456789")
+    task_id = database.create_task(
+        "https://www.youtube.com/watch?v=authtitle01", task_id="authtitle01"
+    )
+    database.update_task(
+        task_id,
+        status="succeeded",
+        title="Fix Edge Loops in Blender!",
+        final_video_path=str(video),
+    )
+
+    download = client.get(f"/api/tasks/{task_id}/artifact/final-video?download=1")
+    assert download.status_code == 200
+    disposition = download.headers["content-disposition"]
+    assert disposition.startswith("attachment")
+    assert "Fix_Edge_Loops_in_Blender" in disposition
+    assert disposition.lower().endswith(".mp4") or ".mp4" in disposition
+
+
+def test_bilibili_meta_artifact_endpoint(client, tmp_path):
+    login(client)
+    session = tmp_path / "session"
+    metadata = session / "metadata"
+    metadata.mkdir(parents=True)
+    (metadata / "bilibili_meta.json").write_text(
+        '{"title":"中文标题","desc":"简介正文","tag":"AI,教程","dynamic":"动态","tid":229}',
+        encoding="utf-8",
+    )
+    task_id = database.create_task(
+        "https://www.youtube.com/watch?v=authmeta0001", task_id="authmeta0001"
+    )
+    database.update_task(task_id, session_path=str(session), status="succeeded")
+
+    response = client.get(f"/api/tasks/{task_id}/artifact/bilibili-meta")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["title"] == "中文标题"
+    assert body["desc"] == "简介正文"
+    assert body["tag"] == "AI,教程"
+    assert body["tid"] == 229
+
+    other = database.create_task(
+        "https://www.youtube.com/watch?v=authmeta0002", task_id="authmeta0002"
+    )
+    empty = client.get(f"/api/tasks/{other}/artifact/bilibili-meta")
+    assert empty.status_code == 404
 
 
 def test_successful_login_revokes_existing_session_and_rotates_token(client):

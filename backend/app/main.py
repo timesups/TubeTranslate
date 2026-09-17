@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -114,7 +115,7 @@ class TaskPackageCreate(BaseModel):
     name: str = ""
     direction: str = "en-zh"
     execution_mode: str = "auto"
-    audio_mode: str = "replace"
+    audio_mode: str = "keep_bgm"
     tts_provider: str = "azure"
     export_subtitle: bool = False
     continue_on_error: bool = True
@@ -1563,11 +1564,58 @@ def final_video(task_id: str, download: bool = False) -> FileResponse:
     final_path = task.get("final_video_path")
     if not final_path or not Path(final_path).exists():
         raise HTTPException(status_code=404, detail="Final video is not available.")
-    name = Path(final_path).name
+    download_name = _final_video_download_name(task)
     if download:
-        return FileResponse(final_path, media_type="video/mp4", filename=name)
-    headers = {"Content-Disposition": f'inline; filename="{name}"'}
-    return FileResponse(final_path, media_type="video/mp4", headers=headers)
+        return FileResponse(
+            final_path,
+            media_type="video/mp4",
+            filename=download_name,
+            content_disposition_type="attachment",
+        )
+    return FileResponse(
+        final_path,
+        media_type="video/mp4",
+        filename=download_name,
+        content_disposition_type="inline",
+    )
+
+
+def _final_video_download_name(task: dict) -> str:
+    title = str(task.get("title") or "").strip()
+    if title:
+        return f"{sanitize_text(title, fallback='video')}.mp4"
+    final_path = str(task.get("final_video_path") or "")
+    name = Path(final_path).name if final_path else ""
+    return name or "video_final.mp4"
+
+
+def _bilibili_meta_path(task: dict) -> Path | None:
+    session_path = str(task.get("session_path") or "").strip()
+    if not session_path:
+        return None
+    path = Path(session_path) / "metadata" / "bilibili_meta.json"
+    return path if path.is_file() else None
+
+
+@app.get("/api/tasks/{task_id}/artifact/bilibili-meta")
+def bilibili_meta_artifact(task_id: str) -> dict:
+    task = database.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    meta_path = _bilibili_meta_path(task)
+    if meta_path is None:
+        raise HTTPException(status_code=404, detail="Bilibili metadata is not available.")
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail="Failed to read Bilibili metadata.") from exc
+    return {
+        "title": str(payload.get("title") or "").strip(),
+        "desc": str(payload.get("desc") or "").strip(),
+        "tag": str(payload.get("tag") or "").strip(),
+        "dynamic": str(payload.get("dynamic") or "").strip(),
+        "tid": payload.get("tid"),
+    }
 
 
 @app.get("/api/cookies/youtube")
