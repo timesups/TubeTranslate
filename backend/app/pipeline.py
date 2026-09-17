@@ -534,31 +534,40 @@ class PipelineRunner:
     def _asr_fix(self, task: dict) -> None:
         import json as _json
 
+        from .adapters.asr_sentence_fixer import fix_asr_sentences
+
         session = _require(self.artifacts.session, "session")
+        source = detect_source(task["url"])
         subtitle_file = self._uploaded_subtitle_path(task)
         if subtitle_file:
-            from .adapters.local_subtitles import write_uploaded_asr_fixed_artifact
-
-            source = detect_source(task["url"])
-            self.artifacts.asr_fixed_file = write_uploaded_asr_fixed_artifact(
-                subtitle_file,
+            asr_file = self.artifacts.asr_file
+            if asr_file is None or not asr_file.exists():
+                asr_file = self._write_uploaded_asr_artifact(task)
+                self.artifacts.asr_file = asr_file
+            # Subtitle cues can be over-segmented; reuse the same English short-clause merge.
+            fixed_path = session / "metadata" / "asr_fixed.json"
+            if fixed_path.exists():
+                fixed_path.unlink()
+            before = len(_json.loads(asr_file.read_text(encoding="utf-8"))["result"]["utterances"])
+            self.artifacts.asr_fixed_file = fix_asr_sentences(
+                asr_file,
                 session,
-                source,
+                language=source.asr_language,
             )
             sentences = _json.loads(
                 self.artifacts.asr_fixed_file.read_text(encoding="utf-8")
             )["result"]["utterances"]
             self.stage_message(
                 "asr_fix",
-                f"Reused uploaded SRT subtitles ({len(sentences)} cues); skipped sentence splitting",
+                (
+                    f"Merged subtitle cues {before} -> {len(sentences)} sentences "
+                    f"-> {self.artifacts.asr_fixed_file.name}"
+                ),
             )
             return
 
-        from .adapters.asr_sentence_fixer import fix_asr_sentences
-
         asr_file = _require(self.artifacts.asr_file, "asr_file")
         before = len(_json.loads(asr_file.read_text(encoding="utf-8"))["result"]["utterances"])
-        source = detect_source(task["url"])
         self.artifacts.asr_fixed_file = fix_asr_sentences(asr_file, session, language=source.asr_language)
         sentences = _json.loads(self.artifacts.asr_fixed_file.read_text(encoding="utf-8"))["result"]["utterances"]
         self.stage_message(
