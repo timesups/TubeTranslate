@@ -534,23 +534,42 @@ class PipelineRunner:
     def _asr_fix(self, task: dict) -> None:
         import json as _json
 
-        from .adapters.asr_sentence_fixer import fix_asr_sentences
+        from .adapters.asr_sentence_fixer import fix_asr_payload, fix_asr_sentences
 
         session = _require(self.artifacts.session, "session")
         source = detect_source(task["url"])
         subtitle_file = self._uploaded_subtitle_path(task)
         if subtitle_file:
-            asr_file = self.artifacts.asr_file
-            if asr_file is None or not asr_file.exists():
-                asr_file = self._write_uploaded_asr_artifact(task)
-                self.artifacts.asr_file = asr_file
+            from .adapters.local_subtitles import (
+                uploaded_asr_payload,
+                write_uploaded_asr_fixed_artifact,
+            )
+
+            if self._subtitle_mode(task) == "translated":
+                self.artifacts.asr_fixed_file = write_uploaded_asr_fixed_artifact(
+                    subtitle_file,
+                    session,
+                    source,
+                )
+                sentences = _json.loads(
+                    self.artifacts.asr_fixed_file.read_text(encoding="utf-8")
+                )["result"]["utterances"]
+                self.stage_message(
+                    "asr_fix",
+                    f"Rebuilt translated subtitle cues ({len(sentences)} cues) from upload",
+                )
+                return
+
+            # A stage redo must be reproducible from the uploaded subtitle and
+            # must not trust or overwrite the cached upstream ASR artifact.
+            asr_payload = uploaded_asr_payload(subtitle_file, source)
             # Subtitle cues can be over-segmented; reuse the same English short-clause merge.
             fixed_path = session / "metadata" / "asr_fixed.json"
             if fixed_path.exists():
                 fixed_path.unlink()
-            before = len(_json.loads(asr_file.read_text(encoding="utf-8"))["result"]["utterances"])
-            self.artifacts.asr_fixed_file = fix_asr_sentences(
-                asr_file,
+            before = len(asr_payload["result"]["utterances"])
+            self.artifacts.asr_fixed_file = fix_asr_payload(
+                asr_payload,
                 session,
                 language=source.asr_language,
             )

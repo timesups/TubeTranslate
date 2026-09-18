@@ -493,7 +493,7 @@ def test_pipeline_uses_uploaded_srt_and_skips_model_stages(monkeypatch, tmp_path
     assert task["status"] == "succeeded"
     assert [item["dst"] for item in translation] == ["你好", "世界"]
     assert "skipped Whisper" in log_content
-    assert "Merged subtitle cues" in log_content
+    assert "Rebuilt translated subtitle cues" in log_content
     assert "skipped OpenAI translation" in log_content
 
 

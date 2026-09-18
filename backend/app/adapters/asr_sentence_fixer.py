@@ -580,11 +580,28 @@ def fix_asr_sentences(
     end_pad: int = 300,
     language: str = "en",
 ) -> Path:
+    data = json.loads(Path(asr_file).read_text(encoding="utf-8"))
+    return fix_asr_payload(
+        data,
+        session,
+        start_pad=start_pad,
+        end_pad=end_pad,
+        language=language,
+    )
+
+
+def fix_asr_payload(
+    data: dict[str, Any],
+    session: Path,
+    start_pad: int = 100,
+    end_pad: int = 300,
+    language: str = "en",
+) -> Path:
+    """Normalize an in-memory ASR payload and write ``asr_fixed.json``."""
     output_file = session / "metadata" / "asr_fixed.json"
     if output_file.exists():
         return output_file
 
-    data = json.loads(Path(asr_file).read_text(encoding="utf-8"))
     utterances = data["result"]["utterances"]
     duration = data.get("audio_info", {}).get("duration", 0)
 

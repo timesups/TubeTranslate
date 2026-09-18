@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 from backend.app.adapters import audio
@@ -25,9 +26,19 @@ def test_slot_window_respects_prior_audio_end():
 
 
 def test_fit_ratio_speeds_up_overflow():
-    # 2s TTS into 1s slot → ratio ~0.5
-    ratio = audio._fit_ratio(current_sec=2.0, available_sec=1.0, base=1.0)
-    assert 0.24 <= ratio <= 0.51
+    # Severe overflow is capped instead of producing unnaturally fast speech.
+    ratio = audio._fit_ratio(current_sec=2.0, available_sec=1.0)
+    assert ratio == audio.MIN_STRETCH_RATIO
+
+
+def test_fit_ratio_does_not_slow_short_clip_to_fill_slot():
+    ratio = audio._fit_ratio(current_sec=0.5, available_sec=2.0)
+    assert ratio == 1.0
+
+
+def test_fit_ratio_uses_gentle_speedup_when_it_is_enough():
+    ratio = audio._fit_ratio(current_sec=1.2, available_sec=1.0)
+    assert ratio == pytest.approx(1.0 / 1.2)
 
 
 def test_merge_tts_audio_hard_truncates_to_next_cue(tmp_path, monkeypatch):
@@ -58,8 +69,6 @@ def test_merge_tts_audio_hard_truncates_to_next_cue(tmp_path, monkeypatch):
         np.zeros(int(target_sec * sr), dtype=np.float32),
         sr,
     ))
-    monkeypatch.setattr(audio, "_base_speed_factor", lambda *_: 1.0)
-
     dubbing, timings = audio.merge_tts_audio(translation_file, tts_dir, session)
     assert dubbing.exists()
     data = json.loads(timings.read_text(encoding="utf-8"))["translation"]

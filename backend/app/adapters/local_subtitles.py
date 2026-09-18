@@ -236,6 +236,12 @@ def _uploaded_subtitle_payloads(
     return asr_payload, translation_payload
 
 
+def uploaded_asr_payload(subtitle_file: Path, source: SourceConfig) -> dict[str, Any]:
+    """Build a fresh ASR-shaped payload directly from an uploaded subtitle."""
+    asr_payload, _ = _uploaded_subtitle_payloads(subtitle_file, source)
+    return asr_payload
+
+
 def _write_json_artifact(path: Path, payload: dict[str, Any]) -> Path:
     content = json.dumps(payload, ensure_ascii=False, indent=2)
     runtime_security.atomic_write_private_text(path, content)
